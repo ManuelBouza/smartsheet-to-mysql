@@ -8,13 +8,14 @@ import json
 import os
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar, cast
 
 import pandas as pd
 import smartsheet
 from dotenv import load_dotenv
-from smartsheet.models import Column, Error, Sheet
+from smartsheet.models import Cell, Column, Error, Sheet
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, URL
 
@@ -26,9 +27,41 @@ DEFAULT_MYSQL_PORT = 3306
 DEFAULT_CHUNK_SIZE = 1000
 
 ModelType = TypeVar("ModelType")
+IfExistsMode = Literal["fail", "replace", "append"]
 
 
 load_dotenv()
+
+
+@dataclass
+class Args:
+    sheet_id: int
+    api_base: str
+    page_size: int
+    mysql_url: str | None
+    mysql_host: str | None
+    mysql_port: int
+    mysql_database: str | None
+    mysql_user: str | None
+    mysql_password: str | None
+    mysql_table: str | None
+    if_exists: IfExistsMode
+    chunksize: int
+
+
+class ParsedNamespace(argparse.Namespace):
+    sheet_id: str | None
+    api_base: str
+    page_size: int
+    mysql_url: str | None
+    mysql_host: str | None
+    mysql_port: int
+    mysql_database: str | None
+    mysql_user: str | None
+    mysql_password: str | None
+    mysql_table: str | None
+    if_exists: IfExistsMode
+    chunksize: int
 
 
 def build_smartsheet_client(
@@ -108,7 +141,7 @@ def _require_sheet(response: Sheet | Error) -> Sheet:
     return response
 
 
-def _extract_object_value(cell: Any) -> Any:
+def _extract_object_value(cell: Cell) -> Any:
     object_value = getattr(cell, "object_value", None)
     if object_value is None:
         return None
@@ -264,7 +297,7 @@ def write_dataframe_to_mysql(
     *,
     table_name: str,
     engine: Engine,
-    if_exists: str = "replace",
+    if_exists: IfExistsMode = "replace",
     chunksize: int = DEFAULT_CHUNK_SIZE,
 ) -> str:
     resolved_table_name = _sanitize_mysql_identifier(table_name)
@@ -284,15 +317,16 @@ def _resolve_sheet_id(raw_sheet_id: str | None, parser: argparse.ArgumentParser)
     sheet_id_value = raw_sheet_id or os.getenv("SMARTSHEET_SHEET_ID")
     if not sheet_id_value:
         parser.error("Missing sheet_id. Pass it as an argument or set SMARTSHEET_SHEET_ID.")
+        raise AssertionError("unreachable")
 
     try:
         return int(sheet_id_value)
-    except ValueError as exc:
+    except ValueError:
         parser.error(f"Invalid sheet_id '{sheet_id_value}'. SMARTSHEET_SHEET_ID must be an integer.")
-        raise exc
+        raise AssertionError("unreachable")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args() -> Args:
     parser = argparse.ArgumentParser(description="Copy a Smartsheet sheet into MySQL.")
     parser.add_argument("sheet_id", nargs="?", help="Smartsheet sheet ID. Defaults to SMARTSHEET_SHEET_ID.")
     parser.add_argument(
@@ -354,9 +388,21 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CHUNK_SIZE,
         help="Batch size used when inserting rows into MySQL.",
     )
-    args = parser.parse_args()
-    args.sheet_id = _resolve_sheet_id(args.sheet_id, parser)
-    return args
+    namespace = cast(ParsedNamespace, parser.parse_args(namespace=ParsedNamespace()))
+    return Args(
+        sheet_id=_resolve_sheet_id(namespace.sheet_id, parser),
+        api_base=namespace.api_base,
+        page_size=namespace.page_size,
+        mysql_url=namespace.mysql_url,
+        mysql_host=namespace.mysql_host,
+        mysql_port=namespace.mysql_port,
+        mysql_database=namespace.mysql_database,
+        mysql_user=namespace.mysql_user,
+        mysql_password=namespace.mysql_password,
+        mysql_table=namespace.mysql_table,
+        if_exists=namespace.if_exists,
+        chunksize=namespace.chunksize,
+    )
 
 
 def main() -> None:
