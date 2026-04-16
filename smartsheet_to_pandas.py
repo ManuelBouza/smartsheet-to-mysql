@@ -8,11 +8,12 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, TypedDict
 
 import pandas as pd
 import smartsheet
 from dotenv import load_dotenv
+from smartsheet.models import Cell, Column, Error, Sheet, SummaryField
 
 
 DEFAULT_API_BASE = "https://api.smartsheet.com/2.0"
@@ -27,6 +28,20 @@ class SheetExtract:
     metadata: dict[str, Any]
     rows_df: pd.DataFrame
     cells_df: pd.DataFrame
+
+
+class ColumnMetadata(TypedDict):
+    column_id: int
+    title: str
+    original_title: str | None
+    type: str | None
+    index: int | None
+    primary: bool
+
+
+JsonPrimitive = str | int | float | bool | None
+JsonValue = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
+ModelType = TypeVar("ModelType")
 
 
 def build_client(access_token: str | None = None, api_base: str = DEFAULT_API_BASE) -> smartsheet.Smartsheet:
@@ -45,30 +60,72 @@ def _safe_get(obj: Any, attribute: str, default: Any = None) -> Any:
     return getattr(obj, attribute, default)
 
 
-def _extract_object_value(cell: Any) -> Any:
+def _as_list(value: list[ModelType] | None) -> list[ModelType]:
+    return value or []
+
+
+def _model_id(obj: Any) -> int:
+    value = _safe_get(obj, "id", _safe_get(obj, "id_"))
+    if not isinstance(value, int):
+        raise ValueError(f"Expected integer id for {type(obj).__name__}, got {value!r}")
+    return value
+
+
+def _model_type(obj: Any) -> str | None:
+    value = _safe_get(obj, "type", _safe_get(obj, "type_"))
+    return value if isinstance(value, str) else None
+
+
+def _require_sheet(response: Sheet | Error) -> Sheet:
+    if isinstance(response, Error):
+        raise RuntimeError(response.message or "Smartsheet API returned an error response.")
+
+    return response
+
+
+def _extract_object_value(cell: Cell) -> JsonValue:
     object_value = _safe_get(cell, "object_value")
     if object_value is None:
         return None
 
     if hasattr(object_value, "to_dict"):
-        return object_value.to_dict()
+        serialized = object_value.to_dict()
+        if isinstance(serialized, dict):
+            return serialized
+        if isinstance(serialized, list):
+            return serialized
+        return str(serialized)
 
     return object_value
 
 
-def _column_names(columns: list[Any]) -> dict[int, str]:
+def _column_names(columns: list[Column]) -> dict[int, str]:
     counts: dict[str, int] = {}
     names: dict[int, str] = {}
 
     for column in columns:
-        title = str(_safe_get(column, "title", f"column_{column.id}")).strip() or f"column_{column.id}"
+        column_id = _model_id(column)
+        title = str(_safe_get(column, "title", f"column_{column_id}")).strip() or f"column_{column_id}"
         counts[title] = counts.get(title, 0) + 1
         if counts[title] == 1:
-            names[column.id] = title
+            names[column_id] = title
         else:
-            names[column.id] = f"{title}__{column.id}"
+            names[column_id] = f"{title}__{column_id}"
 
     return names
+
+
+def _summary_to_metadata(fields: list[SummaryField]) -> list[dict[str, JsonValue]]:
+    return [
+        {
+            "field_id": _model_id(field),
+            "title": field.title,
+            "type": _model_type(field),
+            "display_value": field.display_value,
+            "object_value": _safe_get(field, "object_value"),
+        }
+        for field in fields
+    ]
 
 
 def fetch_sheet(
@@ -79,50 +136,55 @@ def fetch_sheet(
     page_size: int = DEFAULT_PAGE_SIZE,
     level: int = 2,
     include: list[str] | None = None,
-) -> Any:
+) -> Sheet:
     client = build_client(access_token=access_token, api_base=api_base)
     include = include or ["columnType", "objectValue", "writerInfo", "summary"]
 
-    first_page = client.Sheets.get_sheet(
-        sheet_id,
-        include=include,
-        page_size=page_size,
-        page=1,
-        level=level,
+    first_page = _require_sheet(
+        client.Sheets.get_sheet(
+            sheet_id,
+            include=include,
+            page_size=page_size,
+            page=1,
+            level=level,
+        )
     )
 
-    all_rows = list(first_page.rows)
-    total_rows = _safe_get(first_page, "total_row_count", len(all_rows))
+    all_rows = _as_list(first_page.rows)
+    total_rows = first_page.total_row_count or len(all_rows)
     current_page = 1
 
     while len(all_rows) < total_rows:
         current_page += 1
-        next_page = client.Sheets.get_sheet(
-            sheet_id,
-            include=include,
-            page_size=page_size,
-            page=current_page,
-            level=level,
+        next_page = _require_sheet(
+            client.Sheets.get_sheet(
+                sheet_id,
+                include=include,
+                page_size=page_size,
+                page=current_page,
+                level=level,
+            )
         )
-        if not next_page.rows:
+        page_rows = _as_list(next_page.rows)
+        if not page_rows:
             break
-        all_rows.extend(next_page.rows)
+        all_rows.extend(page_rows)
 
     first_page.rows = all_rows
     return first_page
 
 
-def sheet_to_dataframes(sheet: Any) -> SheetExtract:
-    columns = list(sheet.columns)
+def sheet_to_dataframes(sheet: Sheet) -> SheetExtract:
+    columns: list[Column] = list(_as_list(sheet.columns))
     column_names = _column_names(columns)
-    column_meta = {
-        column.id: {
-            "column_id": column.id,
-            "title": column_names[column.id],
-            "original_title": _safe_get(column, "title"),
-            "type": _safe_get(column, "type"),
+    column_meta: dict[int, ColumnMetadata] = {
+        _model_id(column): {
+            "column_id": _model_id(column),
+            "title": column_names[_model_id(column)],
+            "original_title": column.title,
+            "type": _model_type(column),
             "index": _safe_get(column, "index"),
-            "primary": _safe_get(column, "primary", False),
+            "primary": bool(_safe_get(column, "primary", False)),
         }
         for column in columns
     }
@@ -130,22 +192,24 @@ def sheet_to_dataframes(sheet: Any) -> SheetExtract:
     row_records: list[dict[str, Any]] = []
     cell_records: list[dict[str, Any]] = []
 
-    for row in sheet.rows:
+    for row in _as_list(sheet.rows):
         row_record: dict[str, Any] = {
-            "__row_id": _safe_get(row, "id"),
-            "__row_number": _safe_get(row, "row_number"),
-            "__parent_id": _safe_get(row, "parent_id"),
-            "__sibling_id": _safe_get(row, "sibling_id"),
-            "__expanded": _safe_get(row, "expanded"),
-            "__created_at": _safe_get(row, "created_at"),
-            "__modified_at": _safe_get(row, "modified_at"),
+            "__row_id": _model_id(row),
+            "__row_number": row.row_number,
+            "__parent_id": row.parent_id,
+            "__sibling_id": row.sibling_id,
+            "__expanded": row.expanded,
+            "__created_at": row.created_at,
+            "__modified_at": row.modified_at,
         }
 
-        for cell in row.cells:
-            column_id = _safe_get(cell, "column_id")
+        for cell in _as_list(row.cells):
+            column_id = cell.column_id
+            if column_id is None:
+                continue
             column_name = column_names.get(column_id, f"column_{column_id}")
-            value = _safe_get(cell, "value")
-            display_value = _safe_get(cell, "display_value")
+            value = cell.value
+            display_value = cell.display_value
             object_value = _extract_object_value(cell)
 
             row_record[column_name] = value
@@ -156,47 +220,38 @@ def sheet_to_dataframes(sheet: Any) -> SheetExtract:
 
             cell_records.append(
                 {
-                    "sheet_id": _safe_get(sheet, "id"),
-                    "sheet_name": _safe_get(sheet, "name"),
-                    "row_id": _safe_get(row, "id"),
-                    "row_number": _safe_get(row, "row_number"),
+                    "sheet_id": _model_id(sheet),
+                    "sheet_name": sheet.name,
+                    "row_id": _model_id(row),
+                    "row_number": row.row_number,
                     "column_id": column_id,
                     "column_title": column_name,
                     "column_type": column_meta.get(column_id, {}).get("type"),
                     "value": value,
                     "display_value": display_value,
                     "object_value": object_value,
-                    "formula": _safe_get(cell, "formula"),
-                    "hyperlink": _safe_get(cell, "hyperlink"),
+                    "formula": cell.formula,
+                    "hyperlink": cell.hyperlink,
                 }
             )
 
         row_records.append(row_record)
 
     metadata = {
-        "sheet_id": _safe_get(sheet, "id"),
-        "sheet_name": _safe_get(sheet, "name"),
-        "version": _safe_get(sheet, "version"),
-        "from_id": _safe_get(sheet, "from_id"),
-        "owner": _safe_get(sheet, "owner"),
-        "access_level": _safe_get(sheet, "access_level"),
-        "permalink": _safe_get(sheet, "permalink"),
-        "total_row_count": _safe_get(sheet, "total_row_count", len(row_records)),
+        "sheet_id": _model_id(sheet),
+        "sheet_name": sheet.name,
+        "version": sheet.version,
+        "from_id": sheet.from_id,
+        "owner": sheet.owner,
+        "access_level": sheet.access_level,
+        "permalink": sheet.permalink,
+        "total_row_count": sheet.total_row_count or len(row_records),
         "column_count": len(columns),
         "columns": list(column_meta.values()),
     }
 
-    if _safe_get(sheet, "summary"):
-        metadata["summary"] = [
-            {
-                "field_id": _safe_get(field, "id"),
-                "title": _safe_get(field, "title"),
-                "type": _safe_get(field, "type"),
-                "value": _safe_get(field, "value"),
-                "display_value": _safe_get(field, "display_value"),
-            }
-            for field in _safe_get(sheet.summary, "fields", []) or []
-        ]
+    if sheet.summary and sheet.summary.fields:
+        metadata["summary"] = _summary_to_metadata(list(_as_list(sheet.summary.fields)))
 
     rows_df = pd.DataFrame(row_records)
     cells_df = pd.DataFrame(cell_records)
