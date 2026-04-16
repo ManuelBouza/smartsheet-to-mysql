@@ -20,6 +20,7 @@ Crea un archivo `.env` en la raíz del proyecto:
 
 ```bash
 SMARTSHEET_ACCESS_TOKEN="tu_token"
+SMARTSHEET_SHEET_ID="1234567890123456"
 # Opcional si tu cuenta está en otra región:
 # SMARTSHEET_API_BASE="https://api.smartsheet.eu/2.0"
 ```
@@ -48,29 +49,33 @@ MYSQL_TABLE="partner_downline_complaint_tracker"
 ## Uso
 
 ```bash
-python3 smartsheet_to_pandas.py 1234567890123456
+python3 smartsheet_to_pandas.py
 ```
 
 Opciones útiles:
 
+- `SMARTSHEET_SHEET_ID=1234567890123456`
 - `--mysql-table partner_downline_complaint_tracker`
 - `--if-exists replace`
-- `--show-columns`
+- `--page-size 500`
 
 ## Qué escribe en MySQL
 
-- Una tabla principal con una fila por row de Smartsheet.
-- Una tabla de metadatos `<tabla>__meta` con contexto del sheet y un `metadata_json`.
+- Una única tabla principal con una fila por row de Smartsheet.
+- Cada columna del sheet se copia como columna de la tabla.
+- También se incluyen columnas técnicas de fila como `__row_id`, `__row_number`, `__created_at` y `__modified_at`.
 
 ## Uso desde código
 
 ```python
-from smartsheet_to_pandas import build_mysql_engine, fetch_sheet, sheet_to_dataframes, write_extract_to_mysql
+import os
 
-sheet = fetch_sheet(1234567890123456)
-extract = sheet_to_dataframes(sheet)
+from smartsheet_to_pandas import build_mysql_engine, fetch_sheet, sheet_to_dataframe, write_dataframe_to_mysql
+
+sheet = fetch_sheet(int(os.environ["SMARTSHEET_SHEET_ID"]))
+dataframe = sheet_to_dataframe(sheet)
 engine = build_mysql_engine()
-write_extract_to_mysql(extract, table_name="mi_sheet", engine=engine)
+write_dataframe_to_mysql(dataframe, table_name="mi_sheet", engine=engine)
 ```
 
 ## Fuentes oficiales revisadas
