@@ -6,8 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+from datetime import date, datetime, timezone
 from dataclasses import dataclass
-from pathlib import Path
 from collections.abc import Iterable
 from typing import Any, TypeVar, TypedDict
 
@@ -15,10 +16,14 @@ import pandas as pd
 import smartsheet
 from dotenv import load_dotenv
 from smartsheet.models import Cell, Column, Error, Sheet, SummaryField
+from sqlalchemy import create_engine
+from sqlalchemy.engine import URL, Engine
 
 
 DEFAULT_API_BASE = "https://api.smartsheet.com/2.0"
 DEFAULT_PAGE_SIZE = 500
+DEFAULT_MYSQL_PORT = 3306
+DEFAULT_CHUNK_SIZE = 1000
 
 
 load_dotenv()
@@ -55,6 +60,50 @@ def build_client(access_token: str | None = None, api_base: str = DEFAULT_API_BA
     client = smartsheet.Smartsheet(access_token=token, api_base=api_base)
     client.errors_as_exceptions(True)
     return client
+
+
+def build_mysql_engine(
+    *,
+    mysql_url: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    database: str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+) -> Engine:
+    if mysql_url:
+        return create_engine(mysql_url)
+
+    resolved_host = host or os.getenv("MYSQL_HOST")
+    resolved_port = port or int(os.getenv("MYSQL_PORT", str(DEFAULT_MYSQL_PORT)))
+    resolved_database = database or os.getenv("MYSQL_DATABASE")
+    resolved_user = user or os.getenv("MYSQL_USER")
+    resolved_password = password or os.getenv("MYSQL_PASSWORD")
+
+    missing = [
+        name
+        for name, value in (
+            ("MYSQL_HOST", resolved_host),
+            ("MYSQL_DATABASE", resolved_database),
+            ("MYSQL_USER", resolved_user),
+            ("MYSQL_PASSWORD", resolved_password),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            "Missing MySQL configuration. Set MYSQL_URL or provide: " + ", ".join(missing)
+        )
+
+    url = URL.create(
+        "mysql+pymysql",
+        username=resolved_user,
+        password=resolved_password,
+        host=resolved_host,
+        port=resolved_port,
+        database=resolved_database,
+    )
+    return create_engine(url)
 
 
 def _safe_get(obj: Any, attribute: str, default: Any = None) -> Any:
@@ -102,6 +151,68 @@ def _extract_object_value(cell: Cell) -> JsonValue:
         return str(serialized)
 
     return object_value
+
+
+def _sanitize_mysql_identifier(name: str, max_length: int = 64) -> str:
+    sanitized = re.sub(r"[^0-9A-Za-z_]+", "_", name).strip("_").lower()
+    sanitized = re.sub(r"_+", "_", sanitized)
+    if not sanitized:
+        sanitized = "smartsheet_sheet"
+    if sanitized[0].isdigit():
+        sanitized = f"sheet_{sanitized}"
+    return sanitized[:max_length].rstrip("_") or "smartsheet_sheet"
+
+
+def _default_table_name(sheet_name: str) -> str:
+    return _sanitize_mysql_identifier(sheet_name)
+
+
+def _metadata_table_name(base_table_name: str) -> str:
+    suffix = "__meta"
+    truncated = _sanitize_mysql_identifier(base_table_name, max_length=64 - len(suffix))
+    return f"{truncated}{suffix}"
+
+
+def _normalize_mysql_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=True, default=str)
+    if isinstance(value, pd.Timestamp):
+        if value.tzinfo is not None:
+            return value.tz_convert("UTC").tz_localize(None).to_pydatetime()
+        return value.to_pydatetime()
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    if isinstance(value, date):
+        return value.isoformat()
+    if pd.isna(value):
+        return None
+    return value
+
+
+def _prepare_dataframe_for_mysql(df: pd.DataFrame) -> pd.DataFrame:
+    return df.apply(lambda column: column.map(_normalize_mysql_value))
+
+
+def _metadata_dataframe(extract: SheetExtract) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "sheet_id": extract.metadata["sheet_id"],
+                "sheet_name": extract.metadata["sheet_name"],
+                "version": extract.metadata["version"],
+                "access_level": extract.metadata["access_level"],
+                "total_row_count": extract.metadata["total_row_count"],
+                "column_count": extract.metadata["column_count"],
+                "permalink": extract.metadata["permalink"],
+                "synced_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "metadata_json": json.dumps(extract.metadata, ensure_ascii=True, default=str),
+            }
+        ]
+    )
 
 
 def _column_names(columns: list[Column]) -> dict[int, str]:
@@ -279,15 +390,38 @@ def sheet_to_dataframes(sheet: Sheet) -> SheetExtract:
     return SheetExtract(metadata=metadata, rows_df=rows_df, cells_df=cells_df)
 
 
-def export_extract(extract: SheetExtract, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def write_extract_to_mysql(
+    extract: SheetExtract,
+    *,
+    table_name: str,
+    engine: Engine,
+    if_exists: str = "replace",
+    chunksize: int = DEFAULT_CHUNK_SIZE,
+) -> tuple[str, str]:
+    resolved_table_name = _sanitize_mysql_identifier(table_name)
+    resolved_metadata_table = _metadata_table_name(resolved_table_name)
 
-    (output_dir / "sheet_metadata.json").write_text(
-        json.dumps(extract.metadata, indent=2, ensure_ascii=True, default=str),
-        encoding="utf-8",
+    rows_df = _prepare_dataframe_for_mysql(extract.rows_df)
+    metadata_df = _prepare_dataframe_for_mysql(_metadata_dataframe(extract))
+
+    rows_df.to_sql(
+        resolved_table_name,
+        engine,
+        if_exists=if_exists,
+        index=False,
+        chunksize=chunksize,
+        method="multi",
     )
-    extract.rows_df.to_csv(output_dir / "rows.csv", index=False)
-    extract.cells_df.to_csv(output_dir / "cells.csv", index=False)
+    metadata_df.to_sql(
+        resolved_metadata_table,
+        engine,
+        if_exists="replace",
+        index=False,
+        chunksize=1,
+        method="multi",
+    )
+
+    return resolved_table_name, resolved_metadata_table
 
 
 def print_extract_summary(extract: SheetExtract, show_columns: bool = False) -> None:
@@ -312,8 +446,14 @@ def print_extract_summary(extract: SheetExtract, show_columns: bool = False) -> 
         print("Check whether the sheet is actually empty or whether the token has access to the visible data.")
 
 
+def print_mysql_summary(table_name: str, metadata_table_name: str, if_exists: str) -> None:
+    print(f"MySQL rows table: {table_name}")
+    print(f"MySQL metadata table: {metadata_table_name}")
+    print(f"MySQL write mode: {if_exists}")
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download a Smartsheet sheet into pandas DataFrames.")
+    parser = argparse.ArgumentParser(description="Download a Smartsheet sheet and write it to MySQL.")
     parser.add_argument("sheet_id", type=int, help="Smartsheet sheet ID")
     parser.add_argument(
         "--api-base",
@@ -334,10 +474,52 @@ def parse_args() -> argparse.Namespace:
         help="Compatibility level. Use 2 to preserve complex multi-picklist values.",
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="If provided, writes rows.csv, cells.csv, and sheet_metadata.json.",
+        "--mysql-url",
+        default=os.getenv("MYSQL_URL"),
+        help="Full SQLAlchemy MySQL URL. Overrides MYSQL_HOST/PORT/DATABASE/USER/PASSWORD.",
+    )
+    parser.add_argument(
+        "--mysql-host",
+        default=os.getenv("MYSQL_HOST"),
+        help="MySQL host when MYSQL_URL is not provided.",
+    )
+    parser.add_argument(
+        "--mysql-port",
+        type=int,
+        default=int(os.getenv("MYSQL_PORT", str(DEFAULT_MYSQL_PORT))),
+        help="MySQL port when MYSQL_URL is not provided.",
+    )
+    parser.add_argument(
+        "--mysql-database",
+        default=os.getenv("MYSQL_DATABASE"),
+        help="MySQL database name when MYSQL_URL is not provided.",
+    )
+    parser.add_argument(
+        "--mysql-user",
+        default=os.getenv("MYSQL_USER"),
+        help="MySQL user when MYSQL_URL is not provided.",
+    )
+    parser.add_argument(
+        "--mysql-password",
+        default=os.getenv("MYSQL_PASSWORD"),
+        help="MySQL password when MYSQL_URL is not provided.",
+    )
+    parser.add_argument(
+        "--mysql-table",
+        default=os.getenv("MYSQL_TABLE"),
+        help="Target MySQL table. Defaults to a sanitized version of the sheet name.",
+    )
+    parser.add_argument(
+        "--if-exists",
+        choices=["fail", "replace", "append"],
+        default=os.getenv("MYSQL_IF_EXISTS", "replace"),
+        help="How to behave if the target table already exists.",
+    )
+    parser.add_argument(
+        "--chunksize",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help="Batch size used when inserting rows into MySQL.",
     )
     parser.add_argument(
         "--show-columns",
@@ -356,12 +538,29 @@ def main() -> None:
         level=args.level,
     )
     extract = sheet_to_dataframes(sheet)
-
-    if args.output_dir:
-        export_extract(extract, args.output_dir)
-        print(f"Export completed in {args.output_dir}")
-
     print_extract_summary(extract, show_columns=args.show_columns)
+    engine = build_mysql_engine(
+        mysql_url=args.mysql_url,
+        host=args.mysql_host,
+        port=args.mysql_port,
+        database=args.mysql_database,
+        user=args.mysql_user,
+        password=args.mysql_password,
+    )
+
+    target_table = args.mysql_table or _default_table_name(str(extract.metadata["sheet_name"]))
+    try:
+        rows_table, metadata_table = write_extract_to_mysql(
+            extract,
+            table_name=target_table,
+            engine=engine,
+            if_exists=args.if_exists,
+            chunksize=args.chunksize,
+        )
+    finally:
+        engine.dispose()
+
+    print_mysql_summary(rows_table, metadata_table, args.if_exists)
 
 
 if __name__ == "__main__":

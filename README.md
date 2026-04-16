@@ -1,6 +1,6 @@
-# Smartsheet to pandas
+# Smartsheet to MySQL
 
-La vía recomendada para un script Python de extracción desde Smartsheet es usar el SDK oficial de Python sobre el endpoint oficial `GET /sheets/{sheetId}`.
+La vía recomendada para un script Python de extracción desde Smartsheet es usar el SDK oficial de Python sobre el endpoint oficial `GET /sheets/{sheetId}`. Este proyecto descarga el sheet y vuelca sus filas a una tabla MySQL.
 
 Motivos:
 
@@ -24,29 +24,53 @@ SMARTSHEET_ACCESS_TOKEN="tu_token"
 # SMARTSHEET_API_BASE="https://api.smartsheet.eu/2.0"
 ```
 
+## Variables MySQL
+
+Puedes usar una URL completa:
+
+```bash
+MYSQL_URL="mysql+pymysql://usuario:password@host:3306/base_de_datos"
+```
+
+O variables separadas:
+
+```bash
+MYSQL_HOST="localhost"
+MYSQL_PORT="3306"
+MYSQL_DATABASE="smartsheet"
+MYSQL_USER="app_user"
+MYSQL_PASSWORD="tu_password"
+MYSQL_TABLE="partner_downline_complaint_tracker"
+```
+
+`MYSQL_TABLE` es opcional; si no se define, el script usa una versión saneada del nombre del sheet.
+
 ## Uso
 
 ```bash
-python3 smartsheet_to_pandas.py 1234567890123456 --output-dir ./output
+python3 smartsheet_to_pandas.py 1234567890123456
 ```
 
-Eso genera:
+Opciones útiles:
 
-- `output/rows.csv`: dataset ancho, una fila por row de Smartsheet
-- `output/cells.csv`: dataset normalizado, una fila por celda
-- `output/sheet_metadata.json`: metadatos del sheet y sus columnas
+- `--mysql-table partner_downline_complaint_tracker`
+- `--if-exists replace`
+- `--show-columns`
+
+## Qué escribe en MySQL
+
+- Una tabla principal con una fila por row de Smartsheet.
+- Una tabla de metadatos `<tabla>__meta` con contexto del sheet y un `metadata_json`.
 
 ## Uso desde código
 
 ```python
-from smartsheet_to_pandas import fetch_sheet, sheet_to_dataframes
+from smartsheet_to_pandas import build_mysql_engine, fetch_sheet, sheet_to_dataframes, write_extract_to_mysql
 
 sheet = fetch_sheet(1234567890123456)
 extract = sheet_to_dataframes(sheet)
-
-rows_df = extract.rows_df
-cells_df = extract.cells_df
-metadata = extract.metadata
+engine = build_mysql_engine()
+write_extract_to_mysql(extract, table_name="mi_sheet", engine=engine)
 ```
 
 ## Fuentes oficiales revisadas
