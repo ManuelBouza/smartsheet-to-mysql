@@ -51,6 +51,21 @@ class Args:
     chunksize: int
 
 
+@dataclass
+class SyncResult:
+    table_name: str
+    synced_at: datetime
+    rows_in_payload: int
+
+
+@dataclass
+class SyncVerification:
+    total_rows: int
+    distinct_row_ids: int
+    synced_rows: int
+    stale_rows: int
+
+
 class ParsedNamespace(argparse.Namespace):
     sheet_id: str | None
     api_base: str
@@ -306,9 +321,12 @@ def write_dataframe_to_mysql(
     table_name: str,
     engine: Engine,
     chunksize: int = DEFAULT_CHUNK_SIZE,
-) -> str:
+) -> SyncResult:
     resolved_table_name = _sanitize_mysql_identifier(table_name)
     prepared_df = _managed_dataframe(df)
+    synced_at = prepared_df[LAST_SYNCED_AT_COLUMN].iloc[0] if not prepared_df.empty else datetime.now(timezone.utc).replace(
+        tzinfo=None, microsecond=0
+    )
 
     with engine.begin() as connection:
         table = _ensure_sync_table(connection.engine, resolved_table_name, prepared_df)
@@ -328,7 +346,50 @@ def write_dataframe_to_mysql(
             }
             connection.execute(insert_stmt.on_duplicate_key_update(**update_map))
 
-    return resolved_table_name
+    return SyncResult(
+        table_name=resolved_table_name,
+        synced_at=synced_at,
+        rows_in_payload=len(prepared_df),
+    )
+
+
+def verify_sync(engine: Engine, sync_result: SyncResult) -> SyncVerification:
+    inspector = inspect(engine)
+    if not inspector.has_table(sync_result.table_name):
+        raise RuntimeError(f"Sync verification failed: table '{sync_result.table_name}' does not exist.")
+
+    quoted_table = engine.dialect.identifier_preparer.quote_identifier(sync_result.table_name)
+    sync_sql = sync_result.synced_at.strftime("%Y-%m-%d %H:%M:%S")
+    with engine.begin() as connection:
+        row = connection.exec_driver_sql(
+            f"""
+            SELECT
+                COUNT(*) AS total_rows,
+                COUNT(DISTINCT __row_id) AS distinct_row_ids,
+                SUM(CASE WHEN {LAST_SYNCED_AT_COLUMN} = %s THEN 1 ELSE 0 END) AS synced_rows,
+                SUM(CASE WHEN {LAST_SYNCED_AT_COLUMN} IS NULL OR {LAST_SYNCED_AT_COLUMN} <> %s THEN 1 ELSE 0 END) AS stale_rows
+            FROM {quoted_table}
+            """,
+            (sync_sql, sync_sql),
+        ).mappings().one()
+
+    verification = SyncVerification(
+        total_rows=int(row["total_rows"] or 0),
+        distinct_row_ids=int(row["distinct_row_ids"] or 0),
+        synced_rows=int(row["synced_rows"] or 0),
+        stale_rows=int(row["stale_rows"] or 0),
+    )
+
+    if verification.synced_rows != sync_result.rows_in_payload:
+        raise RuntimeError(
+            "Sync verification failed: synced row count in MySQL does not match the rows sent by the script."
+        )
+    if verification.distinct_row_ids < sync_result.rows_in_payload:
+        raise RuntimeError(
+            "Sync verification failed: distinct __row_id count is lower than the synchronized payload size."
+        )
+
+    return verification
 
 
 def _column_type_for_series(column_name: str, series: pd.Series) -> BigInteger | Boolean | DateTime | Float | Text:
@@ -514,19 +575,22 @@ def main() -> None:
 
     target_table = args.mysql_table or _default_table_name(sheet.name or str(args.sheet_id))
     try:
-        mysql_table = write_dataframe_to_mysql(
+        sync_result = write_dataframe_to_mysql(
             dataframe,
             table_name=target_table,
             engine=engine,
             chunksize=args.chunksize,
         )
+        verification = verify_sync(engine, sync_result)
     finally:
         engine.dispose()
 
     print(f"Sheet: {sheet.name} ({_model_id(sheet)})")
     print(f"Rows copied: {len(dataframe)}")
-    print(f"MySQL table: {mysql_table}")
+    print(f"MySQL table: {sync_result.table_name}")
     print("MySQL sync mode: upsert")
+    print(f"Verification: total_rows={verification.total_rows}, distinct_row_ids={verification.distinct_row_ids}")
+    print(f"Verification: synced_rows={verification.synced_rows}, stale_rows={verification.stale_rows}")
 
 
 if __name__ == "__main__":
