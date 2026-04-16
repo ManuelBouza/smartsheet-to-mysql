@@ -8,6 +8,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, TypeVar, TypedDict
 
 import pandas as pd
@@ -60,8 +61,10 @@ def _safe_get(obj: Any, attribute: str, default: Any = None) -> Any:
     return getattr(obj, attribute, default)
 
 
-def _as_list(value: list[ModelType] | None) -> list[ModelType]:
-    return value or []
+def _as_list(value: Iterable[ModelType] | None) -> list[ModelType]:
+    if value is None:
+        return []
+    return list(value)
 
 
 def _model_id(obj: Any) -> int:
@@ -73,7 +76,9 @@ def _model_id(obj: Any) -> int:
 
 def _model_type(obj: Any) -> str | None:
     value = _safe_get(obj, "type", _safe_get(obj, "type_"))
-    return value if isinstance(value, str) else None
+    if value is None:
+        return None
+    return value if isinstance(value, str) else str(value)
 
 
 def _require_sheet(response: Sheet | Error) -> Sheet:
@@ -152,6 +157,21 @@ def fetch_sheet(
 
     all_rows = _as_list(first_page.rows)
     total_rows = first_page.total_row_count or len(all_rows)
+
+    # Some sheets return total_row_count correctly but an empty first page when paginated.
+    # Retry once without pagination so extraction still works.
+    if total_rows > 0 and not all_rows:
+        unpaginated_sheet = _require_sheet(
+            client.Sheets.get_sheet(
+                sheet_id,
+                include=include,
+                level=level,
+            )
+        )
+        unpaginated_rows = _as_list(unpaginated_sheet.rows)
+        if unpaginated_rows:
+            return unpaginated_sheet
+
     current_page = 1
 
     while len(all_rows) < total_rows:
@@ -270,6 +290,28 @@ def export_extract(extract: SheetExtract, output_dir: Path) -> None:
     extract.cells_df.to_csv(output_dir / "cells.csv", index=False)
 
 
+def print_extract_summary(extract: SheetExtract, show_columns: bool = False) -> None:
+    print(f"Sheet: {extract.metadata['sheet_name']} ({extract.metadata['sheet_id']})")
+    print(f"Rows loaded: {len(extract.rows_df)}")
+    print(f"API total_row_count: {extract.metadata['total_row_count']}")
+    print(f"Columns loaded: {extract.metadata['column_count']}")
+
+    column_titles = [str(column["title"]) for column in extract.metadata["columns"]]
+    preview = ", ".join(column_titles[:5])
+    if preview:
+        suffix = " ..." if len(column_titles) > 5 else ""
+        print(f"Column preview: {preview}{suffix}")
+
+    if show_columns:
+        print("Columns:")
+        for index, column in enumerate(extract.metadata["columns"], start=1):
+            print(f"  {index:02d}. {column['title']} [{column['type'] or 'UNKNOWN'}]")
+
+    if len(extract.rows_df) == 0:
+        print("Warning: the API returned zero rows for this sheet.")
+        print("Check whether the sheet is actually empty or whether the token has access to the visible data.")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download a Smartsheet sheet into pandas DataFrames.")
     parser.add_argument("sheet_id", type=int, help="Smartsheet sheet ID")
@@ -297,6 +339,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="If provided, writes rows.csv, cells.csv, and sheet_metadata.json.",
     )
+    parser.add_argument(
+        "--show-columns",
+        action="store_true",
+        help="Print the full column list after loading the sheet.",
+    )
     return parser.parse_args()
 
 
@@ -314,9 +361,7 @@ def main() -> None:
         export_extract(extract, args.output_dir)
         print(f"Export completed in {args.output_dir}")
 
-    print(f"Sheet: {extract.metadata['sheet_name']} ({extract.metadata['sheet_id']})")
-    print(f"Rows loaded: {len(extract.rows_df)}")
-    print(f"Columns loaded: {extract.metadata['column_count']}")
+    print_extract_summary(extract, show_columns=args.show_columns)
 
 
 if __name__ == "__main__":
