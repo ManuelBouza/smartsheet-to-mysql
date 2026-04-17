@@ -29,6 +29,8 @@ class SyncResult:
     synced_at: datetime
     rows_in_payload: int
     rows_marked_deleted: int = 0
+    verification_distinct_column: str | None = None
+    verification_distinct_values: tuple[object, ...] = ()
 
 
 @dataclass

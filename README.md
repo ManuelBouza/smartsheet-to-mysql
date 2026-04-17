@@ -73,7 +73,7 @@ Opciones útiles:
 
 - Una única tabla principal con una fila por row de Smartsheet.
 - Cada columna del sheet se copia como columna de la tabla.
-- También se incluyen columnas técnicas de fila como `__row_id`, `__row_number`, `__created_at`, `__modified_at`, `last_synced_at`, `is_deleted` y `deleted_at`.
+- También se incluyen columnas técnicas de fila como `__row_id`, `__row_number`, `__created_at`, `__modified_at`, `last_synced_at`, `is_deleted` y `deleted_at` (excepto en `CTM`, donde se sincronizan solo `__created_at` y `__modified_at`).
 - La sincronización es incremental por `__row_id`: inserta filas nuevas y actualiza filas existentes sin recrear la tabla.
 - Si una fila desaparece del sheet, no se borra de MySQL salvo que ejecutes `--mark-missing-as-deleted`, que la marca como borrada lógica.
 - Si aparece una columna nueva en Smartsheet, el script la añade a la tabla.

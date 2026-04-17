@@ -15,6 +15,7 @@ from .common import normalized_mysql_name
 class TableSyncConfig:
     explicit_column_mapping: Mapping[str, str]
     allowed_target_columns: frozenset[str] | None = None
+    verification_distinct_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,8 +69,16 @@ TECHNICAL_SYNC_COLUMNS: frozenset[str] = frozenset(
 )
 
 
+CTM_TECHNICAL_SYNC_COLUMNS: frozenset[str] = frozenset(
+    {
+        "__created_at",
+        "__modified_at",
+    }
+)
+
+
 CTM_ALLOWED_TARGET_COLUMNS: frozenset[str] = frozenset(
-    {rule.target_column for rule in CTM_COLUMN_RULES} | set(TECHNICAL_SYNC_COLUMNS)
+    {rule.target_column for rule in CTM_COLUMN_RULES} | set(CTM_TECHNICAL_SYNC_COLUMNS)
 )
 
 
@@ -77,6 +86,7 @@ KNOWN_TABLE_SYNC_CONFIGS: dict[str, TableSyncConfig] = {
     normalized_mysql_name("CTM"): TableSyncConfig(
         explicit_column_mapping=CTM_EXPLICIT_COLUMN_MAPPING,
         allowed_target_columns=CTM_ALLOWED_TARGET_COLUMNS,
+        verification_distinct_column="complaintCaseId",
     ),
 }
 
@@ -181,3 +191,7 @@ def project_to_allowed_target_columns(df: pd.DataFrame, *, table_name: str) -> p
         column_name for column_name in df.columns if column_name in table_config.allowed_target_columns
     ]
     return df.loc[:, projected_columns]
+
+
+def get_table_sync_config(table_name: str) -> TableSyncConfig | None:
+    return KNOWN_TABLE_SYNC_CONFIGS.get(normalized_mysql_name(table_name))

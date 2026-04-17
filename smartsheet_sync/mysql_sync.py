@@ -21,7 +21,11 @@ from .common import (
     normalized_mysql_name,
     sanitize_mysql_identifier,
 )
-from .column_mapping import apply_explicit_column_mapping, project_to_allowed_target_columns
+from .column_mapping import (
+    apply_explicit_column_mapping,
+    get_table_sync_config,
+    project_to_allowed_target_columns,
+)
 from .models import SyncResult, SyncVerification
 from .transform import managed_dataframe
 
@@ -91,11 +95,11 @@ def write_dataframe_to_mysql(
 ) -> SyncResult:
     resolved_table_name = sanitize_mysql_identifier(table_name, preserve_case=True)
     prepared_df = prepare_sync_dataframe(df, table_name=resolved_table_name)
-    synced_at = (
-        prepared_df[LAST_SYNCED_AT_COLUMN].iloc[0]
-        if not prepared_df.empty
-        else datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    verification_distinct_column, verification_distinct_values = verification_distinct_payload(
+        prepared_df,
+        table_name=resolved_table_name,
     )
+    synced_at = resolve_sync_timestamp(prepared_df)
 
     LOGGER.info("Syncing %s rows into MySQL table %s", len(prepared_df), resolved_table_name)
 
@@ -166,6 +170,8 @@ def write_dataframe_to_mysql(
         synced_at=synced_at,
         rows_in_payload=len(prepared_df),
         rows_marked_deleted=rows_marked_deleted,
+        verification_distinct_column=verification_distinct_column,
+        verification_distinct_values=verification_distinct_values,
     )
 
 
@@ -174,19 +180,50 @@ def verify_sync(engine: Engine, sync_result: SyncResult) -> SyncVerification:
     if not inspector.has_table(sync_result.table_name):
         raise RuntimeError(f"Sync verification failed: table '{sync_result.table_name}' does not exist.")
 
+    available_columns = {
+        normalized_mysql_name(column["name"]): str(column["name"])
+        for column in inspector.get_columns(sync_result.table_name)
+    }
+    has_last_synced_at = normalized_mysql_name(LAST_SYNCED_AT_COLUMN) in available_columns
+    default_distinct_column = available_columns.get(normalized_mysql_name("__row_id"))
+    configured_distinct_column = None
+    if sync_result.verification_distinct_column:
+        configured_distinct_column = available_columns.get(
+            normalized_mysql_name(sync_result.verification_distinct_column)
+        )
+    distinct_column = configured_distinct_column or default_distinct_column
+
     quoted_table = engine.dialect.identifier_preparer.quote_identifier(sync_result.table_name)
     sync_sql = sync_result.synced_at.strftime("%Y-%m-%d %H:%M:%S")
+
+    select_fragments = ["COUNT(*) AS total_rows"]
+    if distinct_column is not None:
+        quoted_distinct_column = engine.dialect.identifier_preparer.quote_identifier(distinct_column)
+        select_fragments.append(f"COUNT(DISTINCT {quoted_distinct_column}) AS distinct_row_ids")
+    else:
+        select_fragments.append("COUNT(*) AS distinct_row_ids")
+
+    params: tuple[Any, ...] = ()
+    if has_last_synced_at:
+        select_fragments.append(
+            f"SUM(CASE WHEN {LAST_SYNCED_AT_COLUMN} = %s THEN 1 ELSE 0 END) AS synced_rows"
+        )
+        select_fragments.append(
+            f"SUM(CASE WHEN {LAST_SYNCED_AT_COLUMN} IS NULL OR {LAST_SYNCED_AT_COLUMN} <> %s THEN 1 ELSE 0 END) AS stale_rows"
+        )
+        params = (sync_sql, sync_sql)
+    else:
+        select_fragments.append("COUNT(*) AS synced_rows")
+        select_fragments.append("0 AS stale_rows")
+
     with engine.begin() as connection:
         row = connection.exec_driver_sql(
             f"""
             SELECT
-                COUNT(*) AS total_rows,
-                COUNT(DISTINCT __row_id) AS distinct_row_ids,
-                SUM(CASE WHEN {LAST_SYNCED_AT_COLUMN} = %s THEN 1 ELSE 0 END) AS synced_rows,
-                SUM(CASE WHEN {LAST_SYNCED_AT_COLUMN} IS NULL OR {LAST_SYNCED_AT_COLUMN} <> %s THEN 1 ELSE 0 END) AS stale_rows
+                {', '.join(select_fragments)}
             FROM {quoted_table}
             """,
-            (sync_sql, sync_sql),
+            params,
         ).mappings().one()
 
     verification = SyncVerification(
@@ -197,15 +234,43 @@ def verify_sync(engine: Engine, sync_result: SyncResult) -> SyncVerification:
     )
 
     if verification.synced_rows != sync_result.rows_in_payload:
-        raise RuntimeError(
-            "Sync verification failed: synced row count in MySQL does not match the rows sent by the script."
+        if not has_last_synced_at:
+            LOGGER.warning(
+                "Sync verification fallback for %s: column %s missing; skipping strict synced_rows equality check.",
+                sync_result.table_name,
+                LAST_SYNCED_AT_COLUMN,
+            )
+        else:
+            raise RuntimeError(
+                "Sync verification failed: synced row count in MySQL does not match the rows sent by the script."
+            )
+
+    expected_distinct_values = tuple(
+        value for value in sync_result.verification_distinct_values if value is not None
+    )
+    if sync_result.verification_distinct_column and expected_distinct_values:
+        matched_distinct_values = count_matching_distinct_values(
+            engine,
+            table_name=sync_result.table_name,
+            column_name=sync_result.verification_distinct_column,
+            values=expected_distinct_values,
         )
-    if verification.distinct_row_ids < sync_result.rows_in_payload:
+        if matched_distinct_values < len(expected_distinct_values):
+            raise RuntimeError(
+                "Sync verification failed: distinct business-key count is lower than the synchronized payload size."
+            )
+    elif verification.distinct_row_ids < sync_result.rows_in_payload:
         raise RuntimeError(
             "Sync verification failed: distinct __row_id count is lower than the synchronized payload size."
         )
 
     return verification
+
+
+def resolve_sync_timestamp(prepared_df: pd.DataFrame) -> datetime:
+    if LAST_SYNCED_AT_COLUMN in prepared_df.columns and not prepared_df.empty:
+        return prepared_df[LAST_SYNCED_AT_COLUMN].iloc[0]
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
 def should_backfill_row_id_on_duplicate(*, table_name: str, managed_columns: list[str]) -> bool:
@@ -239,6 +304,68 @@ def build_alignment_rename_map(
         rename_map[column_name] = target_column_name
 
     return rename_map
+
+
+def verification_distinct_payload(
+    df: pd.DataFrame,
+    *,
+    table_name: str,
+) -> tuple[str | None, tuple[Any, ...]]:
+    table_config = get_table_sync_config(table_name)
+    if table_config is None or table_config.verification_distinct_column is None:
+        return None, ()
+
+    key_column = table_config.verification_distinct_column
+    if key_column not in df.columns:
+        return key_column, ()
+
+    distinct_values = tuple(
+        value for value in df[key_column].dropna().drop_duplicates().tolist()
+    )
+    return key_column, distinct_values
+
+
+def count_matching_distinct_values(
+    engine: Engine,
+    *,
+    table_name: str,
+    column_name: str,
+    values: tuple[Any, ...],
+    chunksize: int = DEFAULT_CHUNK_SIZE,
+) -> int:
+    if not values:
+        return 0
+
+    inspector = inspect(engine)
+    available_columns = {
+        normalized_mysql_name(column["name"]): str(column["name"])
+        for column in inspector.get_columns(table_name)
+    }
+    resolved_column_name = available_columns.get(normalized_mysql_name(column_name))
+    if resolved_column_name is None:
+        return 0
+
+    quoted_table = engine.dialect.identifier_preparer.quote_identifier(table_name)
+    quoted_column = engine.dialect.identifier_preparer.quote_identifier(resolved_column_name)
+
+    matched_total = 0
+    with engine.begin() as connection:
+        for start in range(0, len(values), chunksize):
+            batch = values[start : start + chunksize]
+            if not batch:
+                continue
+            placeholders = ", ".join(["%s"] * len(batch))
+            row = connection.exec_driver_sql(
+                f"""
+                SELECT COUNT(DISTINCT {quoted_column}) AS matched
+                FROM {quoted_table}
+                WHERE {quoted_column} IN ({placeholders})
+                """,
+                tuple(batch),
+            ).mappings().one()
+            matched_total += int(row["matched"] or 0)
+
+    return matched_total
 
 
 def legacy_row_id_pairs_for_backfill(df: pd.DataFrame, *, key_column: str) -> list[tuple[Any, Any]]:

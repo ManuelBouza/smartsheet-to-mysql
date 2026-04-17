@@ -10,9 +10,13 @@ from smartsheet_sync.mysql_sync import (
     mark_missing_rows_as_deleted,
     prepare_sync_dataframe,
     reconcile_legacy_key_changes_by_row_id,
+    resolve_sync_timestamp,
     should_backfill_row_id_on_duplicate,
     validate_existing_table_for_sync,
+    verification_distinct_payload,
+    verify_sync,
 )
+from smartsheet_sync.models import SyncResult
 
 
 class FakeInspector:
@@ -99,6 +103,8 @@ def test_prepare_sync_dataframe_projects_ctm_to_allowed_destination_columns() ->
         [
             {
                 "__row_id": 1,
+                "__created_at": "2026-04-01 08:00:00",
+                "__modified_at": "2026-04-02 09:00:00",
                 "Complaint Case ID": "CC-100",
                 "Status": "Open",
                 "Accountable Broker": "Broker",
@@ -116,8 +122,12 @@ def test_prepare_sync_dataframe_projects_ctm_to_allowed_destination_columns() ->
     assert "complaintCaseId" in prepared_df.columns
     assert "status" in prepared_df.columns
     assert "accountableBroker" in prepared_df.columns
-    assert "__row_id" in prepared_df.columns
-    assert "last_synced_at" in prepared_df.columns
+    assert "__created_at" in prepared_df.columns
+    assert "__modified_at" in prepared_df.columns
+    assert "__row_id" not in prepared_df.columns
+    assert "last_synced_at" not in prepared_df.columns
+    assert "is_deleted" not in prepared_df.columns
+    assert "deleted_at" not in prepared_df.columns
 
 
 def test_prepare_sync_dataframe_keeps_non_ctm_payload_shape() -> None:
@@ -127,6 +137,14 @@ def test_prepare_sync_dataframe_keeps_non_ctm_payload_shape() -> None:
 
     assert "Status" in prepared_df.columns
     assert "unexpected_raw_column" in prepared_df.columns
+
+
+def test_resolve_sync_timestamp_falls_back_when_last_synced_missing() -> None:
+    df = pd.DataFrame([{"complaintCaseId": "CC-1"}])
+
+    synced_at = resolve_sync_timestamp(df)
+
+    assert synced_at is not None
 
 
 def test_prepare_sync_dataframe_maps_ctm_business_dates_from_date_objects() -> None:
@@ -165,13 +183,13 @@ def test_mark_missing_rows_as_deleted_fails_fast_on_empty_payload(monkeypatch) -
         raise AssertionError("Expected mark_missing_rows_as_deleted to raise")
 
 
-def test_should_backfill_row_id_on_duplicate_for_ctm_legacy_upsert() -> None:
+def test_should_backfill_row_id_on_duplicate_for_ctm_reduced_contract() -> None:
     should_backfill = should_backfill_row_id_on_duplicate(
         table_name="CTM",
-        managed_columns=["__row_id", "complaintCaseId", "status"],
+        managed_columns=["complaintCaseId", "status", "__created_at", "__modified_at"],
     )
 
-    assert should_backfill is True
+    assert should_backfill is False
 
 
 def test_should_backfill_row_id_on_duplicate_false_for_regular_tables() -> None:
@@ -255,3 +273,176 @@ def test_reconcile_legacy_key_changes_by_row_id_handles_real_case_pairs() -> Non
     pairs = legacy_row_id_pairs_for_backfill(df, key_column="complaintCaseId")
 
     assert pairs == [(65, "2222"), (66, "4444")]
+
+
+def test_verification_distinct_payload_for_ctm_uses_business_key() -> None:
+    df = pd.DataFrame(
+        [
+            {"complaintCaseId": "CC-1"},
+            {"complaintCaseId": "CC-1"},
+            {"complaintCaseId": "CC-2"},
+            {"complaintCaseId": None},
+        ]
+    )
+
+    column_name, values = verification_distinct_payload(df, table_name="CTM")
+
+    assert column_name == "complaintCaseId"
+    assert values == ("CC-1", "CC-2")
+
+
+def test_verify_sync_for_ctm_without_row_id_or_last_synced_at(monkeypatch) -> None:
+    class _Inspector:
+        @staticmethod
+        def has_table(table_name: str) -> bool:
+            return True
+
+        @staticmethod
+        def get_columns(table_name: str) -> list[dict]:
+            return [
+                {"name": "complaintCaseId"},
+                {"name": "status"},
+                {"name": "__created_at"},
+                {"name": "__modified_at"},
+            ]
+
+    class _Preparer:
+        @staticmethod
+        def quote_identifier(identifier: str) -> str:
+            return f"`{identifier}`"
+
+    class _Dialect:
+        identifier_preparer = _Preparer()
+
+    class _Result:
+        @staticmethod
+        def mappings():
+            class _Mappings:
+                @staticmethod
+                def one() -> dict[str, int]:
+                    return {
+                        "total_rows": 10,
+                        "distinct_row_ids": 10,
+                        "synced_rows": 10,
+                        "stale_rows": 0,
+                    }
+
+            return _Mappings()
+
+    class _Connection:
+        @staticmethod
+        def exec_driver_sql(sql: str, params: tuple):
+            return _Result()
+
+    class _Context:
+        def __enter__(self):
+            return _Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Engine:
+        dialect = _Dialect()
+
+        @staticmethod
+        def begin():
+            return _Context()
+
+    monkeypatch.setattr("smartsheet_sync.mysql_sync.inspect", lambda engine: _Inspector())
+    monkeypatch.setattr(
+        "smartsheet_sync.mysql_sync.count_matching_distinct_values",
+        lambda *args, **kwargs: 2,
+    )
+
+    verification = verify_sync(
+        _Engine(),
+        SyncResult(
+            table_name="CTM",
+            synced_at=pd.Timestamp("2026-04-17 10:00:00").to_pydatetime(),
+            rows_in_payload=2,
+            verification_distinct_column="complaintCaseId",
+            verification_distinct_values=("CC-1", "CC-2"),
+        ),
+    )
+
+    assert verification.total_rows == 10
+
+
+def test_verify_sync_for_ctm_fails_when_business_key_count_drops(monkeypatch) -> None:
+    class _Inspector:
+        @staticmethod
+        def has_table(table_name: str) -> bool:
+            return True
+
+        @staticmethod
+        def get_columns(table_name: str) -> list[dict]:
+            return [
+                {"name": "complaintCaseId"},
+                {"name": "status"},
+                {"name": "__created_at"},
+                {"name": "__modified_at"},
+            ]
+
+    class _Preparer:
+        @staticmethod
+        def quote_identifier(identifier: str) -> str:
+            return f"`{identifier}`"
+
+    class _Dialect:
+        identifier_preparer = _Preparer()
+
+    class _Result:
+        @staticmethod
+        def mappings():
+            class _Mappings:
+                @staticmethod
+                def one() -> dict[str, int]:
+                    return {
+                        "total_rows": 10,
+                        "distinct_row_ids": 10,
+                        "synced_rows": 10,
+                        "stale_rows": 0,
+                    }
+
+            return _Mappings()
+
+    class _Connection:
+        @staticmethod
+        def exec_driver_sql(sql: str, params: tuple):
+            return _Result()
+
+    class _Context:
+        def __enter__(self):
+            return _Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Engine:
+        dialect = _Dialect()
+
+        @staticmethod
+        def begin():
+            return _Context()
+
+    monkeypatch.setattr("smartsheet_sync.mysql_sync.inspect", lambda engine: _Inspector())
+    monkeypatch.setattr(
+        "smartsheet_sync.mysql_sync.count_matching_distinct_values",
+        lambda *args, **kwargs: 1,
+    )
+
+    try:
+        verify_sync(
+            _Engine(),
+            SyncResult(
+                table_name="CTM",
+                synced_at=pd.Timestamp("2026-04-17 10:00:00").to_pydatetime(),
+                rows_in_payload=2,
+                verification_distinct_column="complaintCaseId",
+                verification_distinct_values=("CC-1", "CC-2"),
+            ),
+        )
+    except RuntimeError as exc:
+        assert "business-key" in str(exc)
+    else:
+        raise AssertionError("Expected verify_sync to fail when business-key count drops")

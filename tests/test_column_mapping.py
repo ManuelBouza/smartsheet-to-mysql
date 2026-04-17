@@ -91,8 +91,8 @@ def test_project_to_allowed_target_columns_for_ctm_filters_raw_and_unknown_colum
                 "Complaint Case ID": "CC-100",
                 "complaintCaseId": "CC-100",
                 "status": "Open",
-                "__row_id": 1,
-                "last_synced_at": "2026-01-01 00:00:00",
+                "__created_at": "2026-01-01 00:00:00",
+                "__modified_at": "2026-01-01 00:30:00",
                 "Unexpected": "value",
             }
         ]
@@ -105,8 +105,8 @@ def test_project_to_allowed_target_columns_for_ctm_filters_raw_and_unknown_colum
     assert set(projected_df.columns) == {
         "complaintCaseId",
         "status",
-        "__row_id",
-        "last_synced_at",
+        "__created_at",
+        "__modified_at",
     }
     assert set(projected_df.columns).issubset(CTM_ALLOWED_TARGET_COLUMNS)
 
