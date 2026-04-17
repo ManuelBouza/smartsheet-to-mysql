@@ -57,15 +57,38 @@ Opciones útiles:
 - `SMARTSHEET_SHEET_ID=1234567890123456`
 - `--mysql-table partner_downline_complaint_tracker`
 - `--page-size 500`
+- `--dry-run`
+- `--mark-missing-as-deleted`
+- `--log-level DEBUG`
+
+## Mejoras operativas incluidas
+
+- **Logging configurable** con `--log-level` o `LOG_LEVEL`
+- **Modo dry-run** para validar extracción y mapeo sin escribir en MySQL
+- **Marcado opcional de filas ausentes** con `--mark-missing-as-deleted`, que usa `is_deleted` y `deleted_at`
+- **Código modularizado** en el paquete `smartsheet_sync/`
+- **Tests unitarios** base en `tests/`
 
 ## Qué escribe en MySQL
 
 - Una única tabla principal con una fila por row de Smartsheet.
 - Cada columna del sheet se copia como columna de la tabla.
-- También se incluyen columnas técnicas de fila como `__row_id`, `__row_number`, `__created_at`, `__modified_at` y `last_synced_at`.
+- También se incluyen columnas técnicas de fila como `__row_id`, `__row_number`, `__created_at`, `__modified_at`, `last_synced_at`, `is_deleted` y `deleted_at`.
 - La sincronización es incremental por `__row_id`: inserta filas nuevas y actualiza filas existentes sin recrear la tabla.
-- Si una fila desaparece del sheet, no se borra de MySQL.
+- Si una fila desaparece del sheet, no se borra de MySQL salvo que ejecutes `--mark-missing-as-deleted`, que la marca como borrada lógica.
 - Si aparece una columna nueva en Smartsheet, el script la añade a la tabla.
+
+## Desarrollo
+
+Instala dependencias y ejecuta tests:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pytest
+ruff check .
+```
 
 ## Uso desde código
 
