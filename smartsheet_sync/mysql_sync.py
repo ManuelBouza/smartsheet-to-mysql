@@ -115,7 +115,7 @@ def write_dataframe_to_mysql(
             managed_columns=managed_columns,
         ):
             legacy_key_column = LEGACY_TABLES_UPSERT_ROW_ID_KEYS[normalized_mysql_name(resolved_table_name)]
-            release_conflicting_legacy_row_ids(
+            reconcile_legacy_key_changes_by_row_id(
                 connection,
                 table_name=resolved_table_name,
                 key_column=legacy_key_column,
@@ -250,7 +250,7 @@ def legacy_row_id_pairs_for_backfill(df: pd.DataFrame, *, key_column: str) -> li
     return [(row["__row_id"], row[key_column]) for row in candidate_pairs.to_dict(orient="records")]
 
 
-def release_conflicting_legacy_row_ids(
+def reconcile_legacy_key_changes_by_row_id(
     connection: Any,
     *,
     table_name: str,
@@ -266,11 +266,11 @@ def release_conflicting_legacy_row_ids(
         connection.exec_driver_sql(
             f"""
             UPDATE {quoted_table}
-            SET __row_id = NULL
+            SET {quoted_key_column} = %s
             WHERE __row_id = %s
               AND {quoted_key_column} <> %s
             """,
-            (row_id, key_value),
+            (key_value, row_id, key_value),
         )
 
 

@@ -8,7 +8,7 @@ from smartsheet_sync.mysql_sync import (
     column_type_for_series,
     legacy_row_id_pairs_for_backfill,
     mark_missing_rows_as_deleted,
-    release_conflicting_legacy_row_ids,
+    reconcile_legacy_key_changes_by_row_id,
     should_backfill_row_id_on_duplicate,
     validate_existing_table_for_sync,
 )
@@ -153,7 +153,7 @@ def test_legacy_row_id_pairs_for_backfill_skips_nulls_and_deduplicates_row_ids()
     assert pairs == [(10, "CC-1-updated"), (30, "CC-3")]
 
 
-def test_release_conflicting_legacy_row_ids_runs_update_per_pair() -> None:
+def test_reconcile_legacy_key_changes_by_row_id_runs_update_per_pair() -> None:
     class _Preparer:
         @staticmethod
         def quote_identifier(identifier: str) -> str:
@@ -175,7 +175,7 @@ def test_release_conflicting_legacy_row_ids_runs_update_per_pair() -> None:
             self.calls.append((sql, params))
 
     connection = _Connection()
-    release_conflicting_legacy_row_ids(
+    reconcile_legacy_key_changes_by_row_id(
         connection,
         table_name="CTM",
         key_column="complaintCaseId",
@@ -183,6 +183,20 @@ def test_release_conflicting_legacy_row_ids_runs_update_per_pair() -> None:
     )
 
     assert len(connection.calls) == 2
-    assert connection.calls[0][1] == (10, "CC-1")
+    assert connection.calls[0][1] == ("CC-1", 10, "CC-1")
     assert "UPDATE `CTM`" in connection.calls[0][0]
+    assert "SET `complaintCaseId` = %s" in connection.calls[0][0]
     assert "`complaintCaseId` <> %s" in connection.calls[0][0]
+
+
+def test_reconcile_legacy_key_changes_by_row_id_handles_real_case_pairs() -> None:
+    df = pd.DataFrame(
+        [
+            {"__row_id": 65, "complaintCaseId": "2222"},
+            {"__row_id": 66, "complaintCaseId": "4444"},
+        ]
+    )
+
+    pairs = legacy_row_id_pairs_for_backfill(df, key_column="complaintCaseId")
+
+    assert pairs == [(65, "2222"), (66, "4444")]
