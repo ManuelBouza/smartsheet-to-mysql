@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from smartsheet_sync.mysql_sync import column_type_for_series, validate_existing_table_for_sync
+from smartsheet_sync.mysql_sync import (
+    column_type_for_series,
+    mark_missing_rows_as_deleted,
+    validate_existing_table_for_sync,
+)
 
 
 class FakeInspector:
@@ -39,3 +43,20 @@ def test_validate_existing_table_for_sync_rejects_unmapped_required_pk() -> None
         assert "tenant_id" in str(exc)
     else:
         raise AssertionError("Expected validate_existing_table_for_sync to raise")
+
+
+def test_mark_missing_rows_as_deleted_fails_fast_on_empty_payload(monkeypatch) -> None:
+    class _Inspector:
+        def get_columns(self, table_name: str) -> list[dict]:
+            return [{"name": "__row_id"}]
+
+    monkeypatch.setattr("smartsheet_sync.mysql_sync.inspect", lambda engine: _Inspector())
+
+    try:
+        mark_missing_rows_as_deleted(engine=object(), table_name="target_table", row_ids=[])
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "Unsafe soft-delete aborted" in message
+        assert "empty payload" in message
+    else:
+        raise AssertionError("Expected mark_missing_rows_as_deleted to raise")

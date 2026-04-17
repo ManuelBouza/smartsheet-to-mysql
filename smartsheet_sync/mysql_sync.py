@@ -314,43 +314,38 @@ def mark_missing_rows_as_deleted(
     if normalized_mysql_name("__row_id") not in columns:
         return 0
 
+    if not row_ids:
+        raise RuntimeError(
+            "Unsafe soft-delete aborted: '--mark-missing-as-deleted' requires at least one payload '__row_id'. "
+            "An empty payload could mark every row as deleted."
+        )
+
     quoted_table = engine.dialect.identifier_preparer.quote_identifier(table_name)
     now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
     rows_marked_deleted = 0
 
     with engine.begin() as connection:
-        if row_ids:
-            payload_row_ids = set(row_ids)
-            existing_rows = connection.exec_driver_sql(
-                f"SELECT __row_id FROM {quoted_table}"
-            ).scalars()
-            missing_row_ids = [
-                existing_row_id for existing_row_id in existing_rows if existing_row_id not in payload_row_ids
-            ]
-            for start in range(0, len(missing_row_ids), chunksize):
-                batch = missing_row_ids[start : start + chunksize]
-                if not batch:
-                    continue
-                placeholders = ", ".join(["%s"] * len(batch))
-                params = [now, *batch]
-                result = connection.exec_driver_sql(
-                    f"""
-                    UPDATE {quoted_table}
-                    SET {IS_DELETED_COLUMN} = TRUE, {DELETED_AT_COLUMN} = %s
-                    WHERE __row_id IN ({placeholders})
-                      AND ({IS_DELETED_COLUMN} IS NULL OR {IS_DELETED_COLUMN} = FALSE)
-                    """,
-                    tuple(params),
-                )
-                rows_marked_deleted += int(result.rowcount or 0)
-        else:
+        payload_row_ids = set(row_ids)
+        existing_rows = connection.exec_driver_sql(
+            f"SELECT __row_id FROM {quoted_table}"
+        ).scalars()
+        missing_row_ids = [
+            existing_row_id for existing_row_id in existing_rows if existing_row_id not in payload_row_ids
+        ]
+        for start in range(0, len(missing_row_ids), chunksize):
+            batch = missing_row_ids[start : start + chunksize]
+            if not batch:
+                continue
+            placeholders = ", ".join(["%s"] * len(batch))
+            params = [now, *batch]
             result = connection.exec_driver_sql(
                 f"""
                 UPDATE {quoted_table}
                 SET {IS_DELETED_COLUMN} = TRUE, {DELETED_AT_COLUMN} = %s
-                WHERE ({IS_DELETED_COLUMN} IS NULL OR {IS_DELETED_COLUMN} = FALSE)
+                WHERE __row_id IN ({placeholders})
+                  AND ({IS_DELETED_COLUMN} IS NULL OR {IS_DELETED_COLUMN} = FALSE)
                 """,
-                (now,),
+                tuple(params),
             )
             rows_marked_deleted += int(result.rowcount or 0)
 
