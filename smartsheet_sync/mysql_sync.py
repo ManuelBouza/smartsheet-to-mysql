@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_datetime64_any_dtype, is_float_dtype, is_integer_dtype
-from sqlalchemy import BIGINT, BOOLEAN, DATETIME, FLOAT, TEXT, Column as SAColumn, MetaData, Table, create_engine, inspect
+from sqlalchemy import BIGINT, BOOLEAN, DATETIME, FLOAT, TEXT, Column as SAColumn, MetaData, Table, case, create_engine, inspect
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.engine import Engine, URL
 from sqlalchemy.sql.sqltypes import BigInteger, Boolean, DateTime, Float, Text
@@ -21,10 +21,14 @@ from .common import (
     normalized_mysql_name,
     sanitize_mysql_identifier,
 )
+from .column_mapping import apply_explicit_column_mapping
 from .models import SyncResult, SyncVerification
 from .transform import managed_dataframe
 
 LOGGER = logging.getLogger(__name__)
+LEGACY_TABLES_UPSERT_ROW_ID_KEYS: dict[str, str] = {
+    "ctm": "complaintCaseId",
+}
 
 
 def build_mysql_engine(
@@ -80,7 +84,10 @@ def write_dataframe_to_mysql(
     mark_missing_as_deleted: bool = False,
 ) -> SyncResult:
     resolved_table_name = sanitize_mysql_identifier(table_name, preserve_case=True)
-    prepared_df = managed_dataframe(df)
+    prepared_df = apply_explicit_column_mapping(
+        managed_dataframe(df),
+        table_name=resolved_table_name,
+    )
     synced_at = (
         prepared_df[LAST_SYNCED_AT_COLUMN].iloc[0]
         if not prepared_df.empty
@@ -96,13 +103,27 @@ def write_dataframe_to_mysql(
             normalized_mysql_name(column_name): column_name for column_name in table_column_names
         }
         aligned_df = prepared_df.rename(
-            columns={
-                column_name: table_columns_by_normalized.get(normalized_mysql_name(column_name), column_name)
-                for column_name in prepared_df.columns
-            }
+            columns=build_alignment_rename_map(
+                column_names=list(prepared_df.columns),
+                table_columns_by_normalized=table_columns_by_normalized,
+            )
         )
         managed_columns = [column_name for column_name in aligned_df.columns if column_name in table.c]
         records = aligned_df[managed_columns].to_dict(orient="records")
+        if should_backfill_row_id_on_duplicate(
+            table_name=resolved_table_name,
+            managed_columns=managed_columns,
+        ):
+            legacy_key_column = LEGACY_TABLES_UPSERT_ROW_ID_KEYS[normalized_mysql_name(resolved_table_name)]
+            release_conflicting_legacy_row_ids(
+                connection,
+                table_name=resolved_table_name,
+                key_column=legacy_key_column,
+                row_id_pairs=legacy_row_id_pairs_for_backfill(
+                    aligned_df,
+                    key_column=legacy_key_column,
+                ),
+            )
 
         for start in range(0, len(records), chunksize):
             batch = records[start : start + chunksize]
@@ -115,6 +136,14 @@ def write_dataframe_to_mysql(
                 for column_name in managed_columns
                 if column_name != "__row_id"
             }
+            if should_backfill_row_id_on_duplicate(
+                table_name=resolved_table_name,
+                managed_columns=managed_columns,
+            ):
+                update_map["__row_id"] = case(
+                    (table.c.__row_id.is_(None), insert_stmt.inserted["__row_id"]),
+                    else_=table.c.__row_id,
+                )
             connection.execute(insert_stmt.on_duplicate_key_update(**update_map))
 
         rows_marked_deleted = 0
@@ -174,6 +203,75 @@ def verify_sync(engine: Engine, sync_result: SyncResult) -> SyncVerification:
         )
 
     return verification
+
+
+def should_backfill_row_id_on_duplicate(*, table_name: str, managed_columns: list[str]) -> bool:
+    normalized_table_name = normalized_mysql_name(table_name)
+    legacy_key_column = LEGACY_TABLES_UPSERT_ROW_ID_KEYS.get(normalized_table_name)
+    return bool(
+        legacy_key_column
+        and "__row_id" in managed_columns
+        and legacy_key_column in managed_columns
+    )
+
+
+def build_alignment_rename_map(
+    *,
+    column_names: list[str],
+    table_columns_by_normalized: dict[str, str],
+) -> dict[str, str]:
+    existing_columns = set(column_names)
+    rename_map: dict[str, str] = {}
+
+    for column_name in column_names:
+        target_column_name = table_columns_by_normalized.get(normalized_mysql_name(column_name))
+        if target_column_name is None or target_column_name == column_name:
+            continue
+
+        # If explicit mapping already produced the legacy target column, keep the raw
+        # column untouched so pandas does not create duplicate column names.
+        if target_column_name in existing_columns:
+            continue
+
+        rename_map[column_name] = target_column_name
+
+    return rename_map
+
+
+def legacy_row_id_pairs_for_backfill(df: pd.DataFrame, *, key_column: str) -> list[tuple[Any, Any]]:
+    if "__row_id" not in df.columns or key_column not in df.columns:
+        return []
+
+    candidate_pairs = (
+        df[["__row_id", key_column]]
+        .dropna(subset=["__row_id", key_column])
+        .drop_duplicates(subset=["__row_id"], keep="last")
+    )
+    return [(row["__row_id"], row[key_column]) for row in candidate_pairs.to_dict(orient="records")]
+
+
+def release_conflicting_legacy_row_ids(
+    connection: Any,
+    *,
+    table_name: str,
+    key_column: str,
+    row_id_pairs: list[tuple[Any, Any]],
+) -> None:
+    if not row_id_pairs:
+        return
+
+    quoted_table = connection.engine.dialect.identifier_preparer.quote_identifier(table_name)
+    quoted_key_column = connection.engine.dialect.identifier_preparer.quote_identifier(key_column)
+    for row_id, key_value in row_id_pairs:
+        connection.exec_driver_sql(
+            f"""
+            UPDATE {quoted_table}
+            SET __row_id = NULL
+            WHERE __row_id = %s
+              AND {quoted_key_column} <> %s
+            """,
+            (row_id, key_value),
+        )
 
 
 def column_type_for_series(column_name: str, series: pd.Series) -> BigInteger | Boolean | DateTime | Float | Text:
