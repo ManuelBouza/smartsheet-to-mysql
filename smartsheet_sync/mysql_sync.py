@@ -21,7 +21,7 @@ from .common import (
     normalized_mysql_name,
     sanitize_mysql_identifier,
 )
-from .column_mapping import apply_explicit_column_mapping
+from .column_mapping import apply_explicit_column_mapping, project_to_allowed_target_columns
 from .models import SyncResult, SyncVerification
 from .transform import managed_dataframe
 
@@ -29,6 +29,12 @@ LOGGER = logging.getLogger(__name__)
 LEGACY_TABLES_UPSERT_ROW_ID_KEYS: dict[str, str] = {
     "ctm": "complaintCaseId",
 }
+
+
+def prepare_sync_dataframe(df: pd.DataFrame, *, table_name: str) -> pd.DataFrame:
+    managed_df = managed_dataframe(df)
+    mapped_df = apply_explicit_column_mapping(managed_df, table_name=table_name)
+    return project_to_allowed_target_columns(mapped_df, table_name=table_name)
 
 
 def build_mysql_engine(
@@ -84,10 +90,7 @@ def write_dataframe_to_mysql(
     mark_missing_as_deleted: bool = False,
 ) -> SyncResult:
     resolved_table_name = sanitize_mysql_identifier(table_name, preserve_case=True)
-    prepared_df = apply_explicit_column_mapping(
-        managed_dataframe(df),
-        table_name=resolved_table_name,
-    )
+    prepared_df = prepare_sync_dataframe(df, table_name=resolved_table_name)
     synced_at = (
         prepared_df[LAST_SYNCED_AT_COLUMN].iloc[0]
         if not prepared_df.empty

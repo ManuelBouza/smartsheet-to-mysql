@@ -8,6 +8,7 @@ from smartsheet_sync.mysql_sync import (
     column_type_for_series,
     legacy_row_id_pairs_for_backfill,
     mark_missing_rows_as_deleted,
+    prepare_sync_dataframe,
     reconcile_legacy_key_changes_by_row_id,
     should_backfill_row_id_on_duplicate,
     validate_existing_table_for_sync,
@@ -91,6 +92,60 @@ def test_validate_existing_table_for_sync_accepts_explicitly_mapped_pk() -> None
 
     validate_existing_table_for_sync(inspector, "CTM", mapped_df)
     assert mapped_df.loc[0, "complaintCaseId"] == "CC-100"
+
+
+def test_prepare_sync_dataframe_projects_ctm_to_allowed_destination_columns() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "__row_id": 1,
+                "Complaint Case ID": "CC-100",
+                "Status": "Open",
+                "Accountable Broker": "Broker",
+                "unexpected_raw_column": "x",
+            }
+        ]
+    )
+
+    prepared_df = prepare_sync_dataframe(df, table_name="CTM")
+
+    assert "Complaint Case ID" not in prepared_df.columns
+    assert "Status" not in prepared_df.columns
+    assert "Accountable Broker" not in prepared_df.columns
+    assert "unexpected_raw_column" not in prepared_df.columns
+    assert "complaintCaseId" in prepared_df.columns
+    assert "status" in prepared_df.columns
+    assert "accountableBroker" in prepared_df.columns
+    assert "__row_id" in prepared_df.columns
+    assert "last_synced_at" in prepared_df.columns
+
+
+def test_prepare_sync_dataframe_keeps_non_ctm_payload_shape() -> None:
+    df = pd.DataFrame([{"__row_id": 1, "Status": "Open", "unexpected_raw_column": "x"}])
+
+    prepared_df = prepare_sync_dataframe(df, table_name="partner_downline_complaint_tracker")
+
+    assert "Status" in prepared_df.columns
+    assert "unexpected_raw_column" in prepared_df.columns
+
+
+def test_prepare_sync_dataframe_maps_ctm_business_dates_from_date_objects() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "__row_id": 1,
+                "Escalation Received Date": {"objectType": "DATE", "value": "2025-12-02"},
+                "Enrollment Date": {"objectType": "DATE", "value": "2025-12-03"},
+                "Response Due Date": {"objectType": "DATE", "value": "2025-12-04"},
+            }
+        ]
+    )
+
+    prepared_df = prepare_sync_dataframe(df, table_name="CTM")
+
+    assert prepared_df.loc[0, "escalationReceivedDate"] == "2025-12-02"
+    assert prepared_df.loc[0, "enrollmentDate"] == "2025-12-03"
+    assert prepared_df.loc[0, "responseDueDate"] == "2025-12-04"
 
 
 def test_mark_missing_rows_as_deleted_fails_fast_on_empty_payload(monkeypatch) -> None:
