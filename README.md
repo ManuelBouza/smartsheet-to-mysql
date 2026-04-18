@@ -31,6 +31,8 @@ Sincroniza un sheet de Smartsheet a una tabla MySQL usando el SDK oficial de Sma
 
 ## Quick start
 
+### Instalación normal (runtime)
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -153,15 +155,69 @@ Reglas de precedencia:
 
 ## Desarrollo
 
-Instala dependencias y ejecuta tests:
+Instalá dependencias de desarrollo (incluyen runtime + tests/lint) y ejecutá validaciones:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 .venv/bin/pytest
 ruff check .
 ```
+
+## Troubleshooting
+
+### `401 Unauthorized` o error de autenticación Smartsheet
+
+- Verificá que `SMARTSHEET_ACCESS_TOKEN` esté cargado en `.env`.
+- Confirmá que el token tenga permisos sobre el sheet.
+- Si tu cuenta no usa la región por defecto, definí `SMARTSHEET_API_BASE` (por ejemplo, `https://api.smartsheet.eu/2.0`).
+
+### Error de conexión a MySQL (`Can't connect`, timeout, host rechazado)
+
+- Validá `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD` y `MYSQL_DATABASE`.
+- Si corrés MySQL por Docker, revisá que el contenedor esté levantado y expuesto en el puerto correcto.
+- Probá la conexión con un cliente SQL externo para aislar si el problema es de red o credenciales.
+
+### `ModuleNotFoundError` o dependencias faltantes
+
+- Asegurate de crear el entorno virtual e instalar dependencias:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+### `pytest` o `ruff` falla localmente
+
+- Ejecutá siempre desde la raíz del repo.
+- Usá el binario del entorno virtual para evitar diferencias de versión:
+
+```bash
+.venv/bin/pytest
+.venv/bin/ruff check .
+```
+
+## Roadmap y limitaciones conocidas
+
+### Limitaciones actuales
+
+- El flujo está optimizado para sincronizar **un sheet por ejecución**.
+- El modo de borrado es lógico (`--mark-missing-as-deleted`), no elimina físicamente registros.
+- No incluye reintentos avanzados/backoff ni cola de jobs para ejecuciones masivas.
+- No incorpora OAuth: el mecanismo soportado es access token para integraciones machine-to-machine.
+
+### Roadmap sugerido
+
+- [ ] Soporte multi-sheet con configuración declarativa.
+- [ ] Estrategia de reintentos con backoff exponencial y mejor clasificación de errores transitorios.
+- [ ] Métricas de observabilidad (tiempos, filas insertadas/actualizadas, fallos por etapa).
+- [ ] Imagen Docker lista para ejecución programada en CI/CD o cron jobs.
+- [ ] Más cobertura de tests sobre integración (sin credenciales reales) y contratos de schema.
+
+## Licencia
+
+Este proyecto se distribuye bajo licencia MIT. Ver [`LICENSE`](./LICENSE).
 
 ## Publicación recomendada
 
