@@ -6,6 +6,7 @@ services:
     ports:
       - "3307:3306"
     environment:
+      # Development-only defaults. Override via environment variables if needed.
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: smartsheet
       MYSQL_USER: smartsheet

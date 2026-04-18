@@ -1,22 +1,44 @@
 # Smartsheet to MySQL
 
-La vía recomendada para un script Python de extracción desde Smartsheet es usar el SDK oficial de Python sobre el endpoint oficial `GET /sheets/{sheetId}`. Este proyecto descarga el sheet y vuelca sus filas a una tabla MySQL.
+Sincroniza un sheet de Smartsheet a una tabla MySQL usando el SDK oficial de Smartsheet para Python.
 
-Motivos:
+## Qué hace
+
+- lee un sheet completo desde Smartsheet
+- transforma sus filas a un DataFrame
+- mapea columnas de negocio cuando hace falta (por ejemplo `CTM`)
+- hace upsert en MySQL
+- permite decidir qué columnas técnicas sincronizar por config o por CLI
+
+## Casos de uso
+
+- replicar un sheet en MySQL para análisis o reporting
+- alimentar una tabla legacy con nombres de columnas propios
+- correr syncs manuales o programados
+
+## Antes de publicar o compartir este repo
+
+- `.env` está ignorado y no debe subirse
+- `.env.example` contiene solo placeholders
+- `docker-compose.yml` usa credenciales de desarrollo, no productivas
+- revisá que tu `smartsheet_sync.config.json` no tenga nada sensible si planeás versionarlo
+
+## Por qué este enfoque
 
 - Smartsheet mantiene un SDK oficial para Python y su guía de arranque recomienda `pip install smartsheet-python-sdk`.
 - El método `Sheets.get_sheet(...)` soporta `include`, `level`, `page_size` y `page`, que es justo lo necesario para traer el sheet completo y conservar detalles de celdas complejas.
 - Para un script interno o proceso machine-to-machine, la documentación oficial recomienda autenticación con access token; OAuth queda más orientado a apps con consentimiento de usuario.
 
-## Instalación
+## Quick start
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
 ```
 
-Crea un archivo `.env` en la raíz del proyecto:
+Editá `.env` con tus valores reales. Ejemplo:
 
 ```bash
 SMARTSHEET_ACCESS_TOKEN="tu_token"
@@ -25,7 +47,7 @@ SMARTSHEET_SHEET_ID="1234567890123456"
 # SMARTSHEET_API_BASE="https://api.smartsheet.eu/2.0"
 ```
 
-## Variables MySQL
+## Configuración MySQL
 
 Puedes usar una URL completa:
 
@@ -49,7 +71,19 @@ MYSQL_TABLE="partner_downline_complaint_tracker"
 ## Uso
 
 ```bash
-python3 sync_smartsheet_to_mysql.py
+.venv/bin/python sync_smartsheet_to_mysql.py
+```
+
+Prueba segura sin escribir en MySQL:
+
+```bash
+.venv/bin/python sync_smartsheet_to_mysql.py --dry-run
+```
+
+Sincronización real a una tabla específica:
+
+```bash
+.venv/bin/python sync_smartsheet_to_mysql.py --mysql-table CTM
 ```
 
 Opciones útiles:
@@ -125,9 +159,18 @@ Instala dependencias y ejecuta tests:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pytest
+.venv/bin/pytest
 ruff check .
 ```
+
+## Publicación recomendada
+
+Antes de subir a GitHub, revisá esta checklist:
+
+- [ ] `.env` no está trackeado
+- [ ] no hay tokens ni passwords reales en `README.md`, `docker-compose.yml` o `smartsheet_sync.config.json`
+- [ ] `.env.example` usa placeholders
+- [ ] la tabla/flujo de ejemplo no expone nombres internos sensibles si eso es un problema para tu organización
 
 ## Uso desde código
 
