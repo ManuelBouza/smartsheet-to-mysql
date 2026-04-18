@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Backward-compatible CLI wrapper for Smartsheet to MySQL sync."""
+"""Backward-compatible CLI wrapper.
 
-from smartsheet_sync import main
+Use `sync_smartsheet_to_mysql.py` as the primary entrypoint.
+"""
+
+from sync_smartsheet_to_mysql import main
 
 
 if __name__ == "__main__":

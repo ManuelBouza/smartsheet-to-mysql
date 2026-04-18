@@ -49,7 +49,7 @@ MYSQL_TABLE="partner_downline_complaint_tracker"
 ## Uso
 
 ```bash
-python3 smartsheet_to_pandas.py
+python3 sync_smartsheet_to_mysql.py
 ```
 
 Opciones útiles:
@@ -134,7 +134,7 @@ ruff check .
 ```python
 import os
 
-from smartsheet_to_pandas import build_mysql_engine, fetch_sheet, sheet_to_dataframe, write_dataframe_to_mysql
+from smartsheet_sync import build_mysql_engine, fetch_sheet, sheet_to_dataframe, write_dataframe_to_mysql
 
 sheet = fetch_sheet(int(os.environ["SMARTSHEET_SHEET_ID"]))
 dataframe = sheet_to_dataframe(sheet)

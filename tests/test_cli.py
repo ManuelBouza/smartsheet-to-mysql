@@ -8,7 +8,7 @@ def test_parse_args_reads_technical_columns_flags(monkeypatch) -> None:
     monkeypatch.setattr(
         "sys.argv",
         [
-            "smartsheet_to_pandas.py",
+            "sync_smartsheet_to_mysql.py",
             "--technical-columns",
             "__created_at,last_synced_at",
             "--include-technical-columns",
