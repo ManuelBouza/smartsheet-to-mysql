@@ -1,0 +1,9 @@
+{
+  "technical_columns": {
+    "tables": {
+      "CTM": {
+        "columns": ["__created_at", "__modified_at"]
+      }
+    }
+  }
+}
