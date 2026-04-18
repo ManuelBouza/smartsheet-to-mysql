@@ -21,6 +21,10 @@ class Args:
     log_level: str
     dry_run: bool
     mark_missing_as_deleted: bool
+    sync_config: str | None
+    technical_columns: tuple[str, ...] | None
+    include_technical_columns: tuple[str, ...]
+    exclude_technical_columns: tuple[str, ...]
 
 
 @dataclass
@@ -56,3 +60,7 @@ class ParsedNamespace(argparse.Namespace):
     log_level: str
     dry_run: bool
     mark_missing_as_deleted: bool
+    sync_config: str | None
+    technical_columns: str | None
+    include_technical_columns: str | None
+    exclude_technical_columns: str | None

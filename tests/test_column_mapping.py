@@ -5,6 +5,7 @@ import pandas as pd
 from smartsheet_sync.column_mapping import (
     CTM_ALLOWED_TARGET_COLUMNS,
     apply_explicit_column_mapping,
+    project_to_allowed_target_columns_with_technical_columns,
     project_to_allowed_target_columns,
 )
 
@@ -117,3 +118,31 @@ def test_project_to_allowed_target_columns_is_noop_for_unknown_table() -> None:
     projected_df = project_to_allowed_target_columns(df, table_name="other_table")
 
     assert list(projected_df.columns) == ["Complaint Case ID", "status"]
+
+
+def test_project_to_allowed_target_columns_for_ctm_allows_runtime_technical_columns() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "complaintCaseId": "CC-100",
+                "status": "Open",
+                "__created_at": "2026-01-01 00:00:00",
+                "__modified_at": "2026-01-01 00:30:00",
+                "last_synced_at": "2026-01-01 00:31:00",
+                "__row_id": 123,
+            }
+        ]
+    )
+
+    projected_df = project_to_allowed_target_columns_with_technical_columns(
+        df,
+        table_name="CTM",
+        technical_sync_columns={"__created_at", "last_synced_at"},
+    )
+
+    assert set(projected_df.columns) == {
+        "complaintCaseId",
+        "status",
+        "__created_at",
+        "last_synced_at",
+    }

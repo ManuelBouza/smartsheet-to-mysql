@@ -24,7 +24,7 @@ from .common import (
 from .column_mapping import (
     apply_explicit_column_mapping,
     get_table_sync_config,
-    project_to_allowed_target_columns,
+    project_to_allowed_target_columns_with_technical_columns,
 )
 from .models import SyncResult, SyncVerification
 from .transform import managed_dataframe
@@ -35,10 +35,19 @@ LEGACY_TABLES_UPSERT_ROW_ID_KEYS: dict[str, str] = {
 }
 
 
-def prepare_sync_dataframe(df: pd.DataFrame, *, table_name: str) -> pd.DataFrame:
+def prepare_sync_dataframe(
+    df: pd.DataFrame,
+    *,
+    table_name: str,
+    technical_sync_columns: frozenset[str] | set[str] | list[str] | tuple[str, ...] | None = None,
+) -> pd.DataFrame:
     managed_df = managed_dataframe(df)
     mapped_df = apply_explicit_column_mapping(managed_df, table_name=table_name)
-    return project_to_allowed_target_columns(mapped_df, table_name=table_name)
+    return project_to_allowed_target_columns_with_technical_columns(
+        mapped_df,
+        table_name=table_name,
+        technical_sync_columns=technical_sync_columns,
+    )
 
 
 def build_mysql_engine(
@@ -92,9 +101,14 @@ def write_dataframe_to_mysql(
     engine: Engine,
     chunksize: int = DEFAULT_CHUNK_SIZE,
     mark_missing_as_deleted: bool = False,
+    technical_sync_columns: frozenset[str] | set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> SyncResult:
     resolved_table_name = sanitize_mysql_identifier(table_name, preserve_case=True)
-    prepared_df = prepare_sync_dataframe(df, table_name=resolved_table_name)
+    prepared_df = prepare_sync_dataframe(
+        df,
+        table_name=resolved_table_name,
+        technical_sync_columns=technical_sync_columns,
+    )
     verification_distinct_column, verification_distinct_values = verification_distinct_payload(
         prepared_df,
         table_name=resolved_table_name,

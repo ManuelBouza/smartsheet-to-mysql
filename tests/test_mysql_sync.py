@@ -166,6 +166,32 @@ def test_prepare_sync_dataframe_maps_ctm_business_dates_from_date_objects() -> N
     assert prepared_df.loc[0, "responseDueDate"] == "2025-12-04"
 
 
+def test_prepare_sync_dataframe_ctm_runtime_technical_projection() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "Complaint Case ID": "CC-100",
+                "Status": "Open",
+                "__created_at": "2026-01-01 10:00:00",
+                "__modified_at": "2026-01-01 10:30:00",
+            }
+        ]
+    )
+
+    prepared_df = prepare_sync_dataframe(
+        df,
+        table_name="CTM",
+        technical_sync_columns={"__created_at", "last_synced_at"},
+    )
+
+    assert "complaintCaseId" in prepared_df.columns
+    assert "status" in prepared_df.columns
+    assert "__created_at" in prepared_df.columns
+    assert "last_synced_at" in prepared_df.columns
+    assert "__modified_at" not in prepared_df.columns
+    assert "__row_id" not in prepared_df.columns
+
+
 def test_mark_missing_rows_as_deleted_fails_fast_on_empty_payload(monkeypatch) -> None:
     class _Inspector:
         def get_columns(self, table_name: str) -> list[dict]:
@@ -446,3 +472,72 @@ def test_verify_sync_for_ctm_fails_when_business_key_count_drops(monkeypatch) ->
         assert "business-key" in str(exc)
     else:
         raise AssertionError("Expected verify_sync to fail when business-key count drops")
+
+
+def test_verify_sync_without_last_synced_at_and_without_distinct_column(monkeypatch) -> None:
+    class _Inspector:
+        @staticmethod
+        def has_table(table_name: str) -> bool:
+            return True
+
+        @staticmethod
+        def get_columns(table_name: str) -> list[dict]:
+            return [
+                {"name": "status"},
+                {"name": "__created_at"},
+            ]
+
+    class _Preparer:
+        @staticmethod
+        def quote_identifier(identifier: str) -> str:
+            return f"`{identifier}`"
+
+    class _Dialect:
+        identifier_preparer = _Preparer()
+
+    class _Result:
+        @staticmethod
+        def mappings():
+            class _Mappings:
+                @staticmethod
+                def one() -> dict[str, int]:
+                    return {
+                        "total_rows": 3,
+                        "distinct_row_ids": 3,
+                        "synced_rows": 3,
+                        "stale_rows": 0,
+                    }
+
+            return _Mappings()
+
+    class _Connection:
+        @staticmethod
+        def exec_driver_sql(sql: str, params: tuple):
+            return _Result()
+
+    class _Context:
+        def __enter__(self):
+            return _Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Engine:
+        dialect = _Dialect()
+
+        @staticmethod
+        def begin():
+            return _Context()
+
+    monkeypatch.setattr("smartsheet_sync.mysql_sync.inspect", lambda engine: _Inspector())
+
+    verification = verify_sync(
+        _Engine(),
+        SyncResult(
+            table_name="partner_downline_complaint_tracker",
+            synced_at=pd.Timestamp("2026-04-17 10:00:00").to_pydatetime(),
+            rows_in_payload=3,
+        ),
+    )
+
+    assert verification.synced_rows == 3

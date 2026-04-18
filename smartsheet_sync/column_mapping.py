@@ -14,7 +14,8 @@ from .common import normalized_mysql_name
 @dataclass(frozen=True)
 class TableSyncConfig:
     explicit_column_mapping: Mapping[str, str]
-    allowed_target_columns: frozenset[str] | None = None
+    allowed_business_target_columns: frozenset[str] | None = None
+    default_technical_sync_columns: frozenset[str] | None = None
     verification_distinct_column: str | None = None
 
 
@@ -85,7 +86,8 @@ CTM_ALLOWED_TARGET_COLUMNS: frozenset[str] = frozenset(
 KNOWN_TABLE_SYNC_CONFIGS: dict[str, TableSyncConfig] = {
     normalized_mysql_name("CTM"): TableSyncConfig(
         explicit_column_mapping=CTM_EXPLICIT_COLUMN_MAPPING,
-        allowed_target_columns=CTM_ALLOWED_TARGET_COLUMNS,
+        allowed_business_target_columns=frozenset({rule.target_column for rule in CTM_COLUMN_RULES}),
+        default_technical_sync_columns=CTM_TECHNICAL_SYNC_COLUMNS,
         verification_distinct_column="complaintCaseId",
     ),
 }
@@ -183,12 +185,53 @@ def apply_explicit_column_mapping(df: pd.DataFrame, *, table_name: str) -> pd.Da
 
 
 def project_to_allowed_target_columns(df: pd.DataFrame, *, table_name: str) -> pd.DataFrame:
+    return project_to_allowed_target_columns_with_technical_columns(df, table_name=table_name)
+
+
+def normalize_technical_sync_columns(columns: set[str] | frozenset[str] | list[str] | tuple[str, ...]) -> frozenset[str]:
+    normalized_columns = frozenset(column_name.strip() for column_name in columns if column_name and column_name.strip())
+    unknown_columns = sorted(normalized_columns - TECHNICAL_SYNC_COLUMNS)
+    if unknown_columns:
+        allowed = ", ".join(sorted(TECHNICAL_SYNC_COLUMNS))
+        unknown = ", ".join(unknown_columns)
+        raise ValueError(
+            f"Unknown technical column(s): {unknown}. Allowed technical columns: {allowed}."
+        )
+    return normalized_columns
+
+
+def default_technical_sync_columns_for_table(table_name: str) -> frozenset[str]:
     table_config = KNOWN_TABLE_SYNC_CONFIGS.get(normalized_mysql_name(table_name))
-    if table_config is None or table_config.allowed_target_columns is None:
-        return df
+    if table_config and table_config.default_technical_sync_columns is not None:
+        return table_config.default_technical_sync_columns
+    return TECHNICAL_SYNC_COLUMNS
+
+
+def project_to_allowed_target_columns_with_technical_columns(
+    df: pd.DataFrame,
+    *,
+    table_name: str,
+    technical_sync_columns: frozenset[str] | set[str] | list[str] | tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    resolved_technical_sync_columns = (
+        default_technical_sync_columns_for_table(table_name)
+        if technical_sync_columns is None
+        else normalize_technical_sync_columns(technical_sync_columns)
+    )
 
     projected_columns = [
-        column_name for column_name in df.columns if column_name in table_config.allowed_target_columns
+        column_name
+        for column_name in df.columns
+        if column_name not in TECHNICAL_SYNC_COLUMNS or column_name in resolved_technical_sync_columns
+    ]
+
+    table_config = KNOWN_TABLE_SYNC_CONFIGS.get(normalized_mysql_name(table_name))
+    if table_config is None or table_config.allowed_business_target_columns is None:
+        return df.loc[:, projected_columns]
+
+    allowed_target_columns = set(table_config.allowed_business_target_columns) | set(resolved_technical_sync_columns)
+    projected_columns = [
+        column_name for column_name in projected_columns if column_name in allowed_target_columns
     ]
     return df.loc[:, projected_columns]
 

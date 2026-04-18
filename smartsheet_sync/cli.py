@@ -11,6 +11,7 @@ from .common import DEFAULT_API_BASE, DEFAULT_CHUNK_SIZE, DEFAULT_MYSQL_PORT, DE
 from .models import Args, ParsedNamespace
 from .mysql_sync import build_mysql_engine, verify_sync, write_dataframe_to_mysql
 from .smartsheet_client import fetch_sheet
+from .sync_config import parse_technical_columns_csv, resolve_technical_sync_columns
 from .transform import sheet_to_dataframe
 
 load_dotenv()
@@ -98,6 +99,26 @@ def parse_args() -> Args:
         help="Logging level: DEBUG, INFO, WARNING, ERROR.",
     )
     parser.add_argument(
+        "--sync-config",
+        default=os.getenv("SMARTSHEET_SYNC_CONFIG"),
+        help="Path to sync JSON config file (default: SMARTSHEET_SYNC_CONFIG or ./smartsheet_sync.config.json if present).",
+    )
+    parser.add_argument(
+        "--technical-columns",
+        default=None,
+        help="Comma-separated technical columns to sync (full override for selected table).",
+    )
+    parser.add_argument(
+        "--include-technical-columns",
+        default=None,
+        help="Comma-separated technical columns to include in addition to config/default.",
+    )
+    parser.add_argument(
+        "--exclude-technical-columns",
+        default=None,
+        help="Comma-separated technical columns to exclude from sync.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Fetch and transform the sheet, but do not write anything to MySQL.",
@@ -123,6 +144,10 @@ def parse_args() -> Args:
         log_level=namespace.log_level,
         dry_run=namespace.dry_run,
         mark_missing_as_deleted=namespace.mark_missing_as_deleted,
+        sync_config=namespace.sync_config,
+        technical_columns=parse_technical_columns_csv(namespace.technical_columns),
+        include_technical_columns=parse_technical_columns_csv(namespace.include_technical_columns) or (),
+        exclude_technical_columns=parse_technical_columns_csv(namespace.exclude_technical_columns) or (),
     )
 
 
@@ -138,6 +163,13 @@ def main() -> None:
     )
     dataframe = sheet_to_dataframe(sheet)
     target_table = args.mysql_table or default_table_name(sheet.name or str(args.sheet_id))
+    technical_sync_columns = resolve_technical_sync_columns(
+        table_name=target_table,
+        sync_config=args.sync_config,
+        cli_technical_columns=args.technical_columns,
+        cli_include_technical_columns=args.include_technical_columns,
+        cli_exclude_technical_columns=args.exclude_technical_columns,
+    )
 
     if args.dry_run:
         logger.info("Dry run complete. No MySQL writes executed.")
@@ -146,6 +178,7 @@ def main() -> None:
         print(f"Target table: {target_table}")
         print("Dry run: yes")
         print(f"Columns detected: {len(dataframe.columns)}")
+        print(f"Technical columns sync: {', '.join(sorted(technical_sync_columns)) or '(none)'}")
         return
 
     engine = build_mysql_engine(
@@ -164,6 +197,7 @@ def main() -> None:
             engine=engine,
             chunksize=args.chunksize,
             mark_missing_as_deleted=args.mark_missing_as_deleted,
+            technical_sync_columns=technical_sync_columns,
         )
         verification = verify_sync(engine, sync_result)
     finally:

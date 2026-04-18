@@ -60,6 +60,44 @@ Opciones útiles:
 - `--dry-run`
 - `--mark-missing-as-deleted`
 - `--log-level DEBUG`
+- `--sync-config ./smartsheet_sync.config.json`
+- `--technical-columns __created_at,__modified_at`
+- `--include-technical-columns __row_id`
+- `--exclude-technical-columns last_synced_at`
+
+### Configuración de columnas técnicas (fichero + CLI)
+
+Por defecto, el sync conserva el comportamiento actual seguro:
+
+- Tablas generales: sincroniza todas las columnas técnicas conocidas (`__row_id`, `__row_number`, `__parent_id`, `__sibling_id`, `__created_at`, `__modified_at`, `last_synced_at`, `is_deleted`, `deleted_at`).
+- Tabla `CTM`: mantiene el contrato reducido (`__created_at`, `__modified_at`).
+
+Podés crear `smartsheet_sync.config.json` (o pasar otra ruta con `--sync-config`) para ajustar este set sin tocar código:
+
+```json
+{
+  "technical_columns": {
+    "default": {
+      "include": ["__parent_id"],
+      "exclude": ["deleted_at"]
+    },
+    "tables": {
+      "CTM": {
+        "columns": ["__created_at", "__modified_at", "last_synced_at"]
+      }
+    }
+  }
+}
+```
+
+Reglas de precedencia:
+
+1. Defaults del código (seguros y compatibles)
+2. Fichero de config (`technical_columns.default` + `technical_columns.tables.<tabla>`)
+3. CLI (siempre overridea config):
+   - `--technical-columns` reemplaza el set final
+   - `--include-technical-columns` agrega columnas
+   - `--exclude-technical-columns` quita columnas
 
 ## Mejoras operativas incluidas
 
@@ -74,6 +112,7 @@ Opciones útiles:
 - Una única tabla principal con una fila por row de Smartsheet.
 - Cada columna del sheet se copia como columna de la tabla.
 - También se incluyen columnas técnicas de fila como `__row_id`, `__row_number`, `__created_at`, `__modified_at`, `last_synced_at`, `is_deleted` y `deleted_at` (excepto en `CTM`, donde se sincronizan solo `__created_at` y `__modified_at`).
+- Las columnas técnicas pueden configurarse por fichero y por CLI (con precedencia de CLI).
 - La sincronización es incremental por `__row_id`: inserta filas nuevas y actualiza filas existentes sin recrear la tabla.
 - Si una fila desaparece del sheet, no se borra de MySQL salvo que ejecutes `--mark-missing-as-deleted`, que la marca como borrada lógica.
 - Si aparece una columna nueva en Smartsheet, el script la añade a la tabla.
