@@ -1,9 +1,32 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+trap 'handle_error "$LINENO" "$BASH_COMMAND"' ERR
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
 PYTHON_BIN="${PYTHON_BIN:-$SCRIPT_DIR/.venv/bin/python}"
 ENTRYPOINT="$SCRIPT_DIR/sync_smartsheet_to_mysql.py"
+ENV_FILE="$SCRIPT_DIR/.env"
+
+log_info() {
+  printf '[%s] INFO: %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*" >&2
+}
+
+log_warn() {
+  printf '[%s] WARN: %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*" >&2
+}
+
+log_error() {
+  printf '[%s] ERROR: %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*" >&2
+}
+
+handle_error() {
+  local -r line_no="$1"
+  local -r command="$2"
+
+  log_error "Command failed on line ${line_no}: ${command}"
+}
 
 usage() {
   cat <<'EOF'
@@ -24,27 +47,32 @@ Notes:
 EOF
 }
 
+validate_runtime() {
+  if [[ ! -f "$ENTRYPOINT" ]]; then
+    log_error "Entry point not found: $ENTRYPOINT"
+    return 1
+  fi
+
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    log_error "Python binary not found or not executable: $PYTHON_BIN"
+    log_error "Create the virtualenv and install dependencies first:"
+    log_error "  python3 -m venv .venv"
+    log_error "  .venv/bin/pip install -r requirements.txt"
+    return 1
+  fi
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    log_warn ".env was not found in $SCRIPT_DIR"
+    log_warn "Copy .env.example to .env and fill the real values if needed."
+  fi
+}
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
 fi
 
-if [[ ! -f "$ENTRYPOINT" ]]; then
-  echo "ERROR: Entry point not found: $ENTRYPOINT" >&2
-  exit 1
-fi
+validate_runtime
 
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  echo "ERROR: Python binary not found or not executable: $PYTHON_BIN" >&2
-  echo "Create the virtualenv and install dependencies first:" >&2
-  echo "  python3 -m venv .venv" >&2
-  echo "  .venv/bin/pip install -r requirements.txt" >&2
-  exit 1
-fi
-
-if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
-  echo "WARNING: .env was not found in $SCRIPT_DIR" >&2
-  echo "Copy .env.example to .env and fill the real values if needed." >&2
-fi
-
+log_info "Launching ${SCRIPT_NAME} with Python: $PYTHON_BIN"
 exec "$PYTHON_BIN" "$ENTRYPOINT" "$@"
